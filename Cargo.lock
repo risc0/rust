@@ -3295,15 +3295,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "risc0-zkvm-platform"
-version = "0.11.1"
-source = "git+https://github.com/risc0/risc0?rev=d568b2d517e49e3fbe4d6db1e9f963e44b86c67f#d568b2d517e49e3fbe4d6db1e9f963e44b86c67f"
-dependencies = [
- "compiler_builtins",
- "rustc-std-workspace-core",
-]
-
-[[package]]
 name = "rls"
 version = "1.41.0"
 dependencies = [
@@ -5075,7 +5066,6 @@ dependencies = [
  "panic_unwind",
  "profiler_builtins",
  "rand 0.7.3",
- "risc0-zkvm-platform",
  "rustc-demangle",
  "std_detect",
  "unwind",

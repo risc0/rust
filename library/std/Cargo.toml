@@ -47,9 +47,6 @@ hermit-abi = { version = "0.2.0", features = ['rustc-dep-of-std'] }
 [target.wasm32-wasi.dependencies]
 wasi = { version = "0.11.0", features = ['rustc-dep-of-std'], default-features = false }
 
-[target.'cfg(target_os = "zkvm")'.dependencies]
-risc0-zkvm-platform = { git = "https://github.com/risc0/risc0", rev="d568b2d517e49e3fbe4d6db1e9f963e44b86c67f", default-features = false, features = ['rustc-dep-of-std'] }
-
 [features]
 backtrace = [
   "gimli-symbolize",

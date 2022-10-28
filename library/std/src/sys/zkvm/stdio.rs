@@ -1,9 +1,5 @@
+use super::abi;
 use crate::io;
-
-use risc0_zkvm_platform::{
-    io::{SENDRECV_CHANNEL_STDERR, SENDRECV_CHANNEL_STDOUT},
-    rt::host_sendrecv,
-};
 
 pub struct Stdin;
 pub struct Stdout;
@@ -29,7 +25,8 @@ impl Stdout {
 
 impl io::Write for Stdout {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        host_sendrecv(SENDRECV_CHANNEL_STDOUT, buf);
+        unsafe { abi::zkvm_abi_write_stdout(buf) };
+
         Ok(buf.len())
     }
 
@@ -46,7 +43,8 @@ impl Stderr {
 
 impl io::Write for Stderr {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        host_sendrecv(SENDRECV_CHANNEL_STDERR, buf);
+        unsafe { abi::zkvm_abi_write_stderr(buf) };
+
         Ok(buf.len())
     }
 
