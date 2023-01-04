@@ -270,6 +270,7 @@ target | std | host | notes
 `riscv32gc-unknown-linux-gnu` |   |   | RISC-V Linux (kernel 5.4, glibc 2.33)
 `riscv32gc-unknown-linux-musl` |   |   | RISC-V Linux (kernel 5.4, musl + RISCV32 support patches)
 `riscv32imc-esp-espidf` | ✓ |  | RISC-V ESP-IDF
+`riscv32im-risc0-zkvm-elf` | * |  | RISC-V running on the Risc0 Zero-Knowledge Virtual Machine
 `riscv64gc-unknown-freebsd` |   |   | RISC-V FreeBSD
 `riscv64gc-unknown-linux-musl` |   |   | RISC-V Linux (kernel 4.20, musl 1.2.0)
 `s390x-unknown-linux-musl` |  |  | S390x Linux (kernel 2.6.32, MUSL)
