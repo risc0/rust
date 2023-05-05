@@ -789,7 +789,7 @@ impl Config {
         config.rust_optimize = true;
         config.rust_optimize_tests = true;
         config.submodules = None;
-        config.docs = true;
+        config.docs = false;
         config.docs_minification = true;
         config.rust_rpath = true;
         config.channel = "dev".to_string();

@@ -457,7 +457,19 @@ pub(crate) unsafe fn llvm_optimize(
     let llvm_selfprofiler =
         llvm_profiler.as_mut().map(|s| s as *mut _ as *mut c_void).unwrap_or(std::ptr::null_mut());
 
-    let extra_passes = if !is_lto { config.passes.join(",") } else { "".to_string() };
+    let mut extra_passes = if !is_lto { config.passes.join(",") } else { "".to_string() };
+    // risc0: call "loweratomic" to convert atomic memory accesses
+    // into regular memory accesses since we don't support the +a
+    // instruction set.
+    // FIXME(nils): This is most definitely not the right place for
+    // this; find where it should go and move it there.
+    if cgcx.target_arch == "riscv32" {
+        if extra_passes == "" {
+            extra_passes = "loweratomic".to_string();
+        } else {
+            extra_passes += ",loweratomic";
+        }
+    }
 
     let llvm_plugins = config.llvm_plugins.join(",");
 

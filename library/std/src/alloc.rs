@@ -344,7 +344,7 @@ fn default_alloc_error_hook(layout: Layout) {
     }
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, target_vendor = "risc0")))]
 #[doc(hidden)]
 #[alloc_error_handler]
 #[unstable(feature = "alloc_internals", issue = "none")]

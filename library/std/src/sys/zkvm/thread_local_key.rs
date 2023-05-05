@@ -22,7 +22,3 @@ pub unsafe fn get(key: Key) -> *mut u8 {
 #[inline]
 pub unsafe fn destroy(_key: Key) {}
 
-#[inline]
-pub fn requires_synchronized_create() -> bool {
-    false
-}

@@ -21,6 +21,8 @@ Session.vim
 .project
 .favorites.json
 .settings/
+.emacs.desktop
+.emacs.desktop.lock
 
 ## Tool
 .valgrindrc
@@ -75,5 +77,9 @@ package.json
 
 ## Rustdoc GUI tests
 src/test/rustdoc-gui/src/**.lock
+
+## Risc0
+risc0/manifests
+risc0/staging
 
 # Before adding new lines, see the comment at the top.

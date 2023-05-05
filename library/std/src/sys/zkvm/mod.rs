@@ -9,6 +9,7 @@
 
 const WORD_SIZE: usize = core::mem::size_of::<u32>();
 
+pub mod abi;
 pub mod alloc;
 #[path = "../unsupported/args.rs"]
 pub mod args;
@@ -44,5 +45,3 @@ pub mod thread;
 #[deny(unsafe_op_in_unsafe_fn)]
 mod common;
 pub use common::*;
-
-mod abi;

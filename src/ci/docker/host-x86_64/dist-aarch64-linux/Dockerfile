@@ -31,4 +31,4 @@ ENV RUST_CONFIGURE_ARGS \
       --enable-full-tools \
       --enable-profiler \
       --enable-sanitizers
-ENV SCRIPT python3 ../x.py dist --host $HOSTS --target $HOSTS
+ENV SCRIPT python3 ../x.py dist --host $HOSTS --target $HOSTS rustc

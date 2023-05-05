@@ -167,10 +167,10 @@ static TARGETS: &[&str] = &[
 ///
 /// The order here matters, more specific entries should be first.
 static DOCS_FALLBACK: &[(&str, &str)] = &[
-    ("-apple-", "x86_64-apple-darwin"),
-    ("aarch64", "aarch64-unknown-linux-gnu"),
-    ("arm-", "aarch64-unknown-linux-gnu"),
-    ("", "x86_64-unknown-linux-gnu"),
+//    ("-apple-", "x86_64-apple-darwin"),
+//    ("aarch64", "aarch64-unknown-linux-gnu"),
+//    ("arm-", "aarch64-unknown-linux-gnu"),
+//    ("", "x86_64-unknown-linux-gnu"),
 ];
 
 static MSI_INSTALLERS: &[&str] = &[
@@ -335,43 +335,14 @@ impl Builder {
 
     fn add_profiles_to(&mut self, manifest: &mut Manifest) {
         let mut profile = |name, pkgs| self.profile(name, &mut manifest.profiles, pkgs);
-        profile("minimal", &["rustc", "cargo", "rust-std", "rust-mingw"]);
-        profile(
-            "default",
-            &[
-                "rustc",
-                "cargo",
-                "rust-std",
-                "rust-mingw",
-                "rust-docs",
-                "rustfmt-preview",
-                "clippy-preview",
-            ],
-        );
-        profile(
-            "complete",
-            &[
-                "rustc",
-                "cargo",
-                "rust-std",
-                "rust-mingw",
-                "rust-docs",
-                "rustfmt-preview",
-                "clippy-preview",
-                "rls-preview",
-                "rust-analyzer-preview",
-                "rust-src",
-                "llvm-tools-preview",
-                "rust-analysis",
-                "miri-preview",
-            ],
-        );
-
+        profile("minimal", &["rustc", "cargo", "rust-std"]);
+        profile("default", &["rustc", "cargo", "rust-std"]);
+        profile("complete", &["rustc", "cargo", "rust-std"]);
         // The compiler libraries are not stable for end users, and they're also huge, so we only
         // `rustc-dev` for nightly users, and only in the "complete" profile. It's still possible
         // for users to install the additional component manually, if needed.
         if self.versions.channel() == "nightly" {
-            self.extend_profile("complete", &mut manifest.profiles, &["rustc-dev"]);
+            //            self.extend_profile("complete", &mut manifest.profiles, &["rustc-dev"]);
             // Do not include the rustc-docs component for now, as it causes
             // conflicts with the rust-docs component when installed. See
             // #75833.
@@ -487,7 +458,7 @@ impl Builder {
         dst.insert(profile_name.to_owned(), pkgs.iter().map(|s| (*s).to_owned()).collect());
     }
 
-    fn extend_profile(
+/*    fn extend_profile(
         &mut self,
         profile_name: &str,
         dst: &mut BTreeMap<String, Vec<String>>,
@@ -497,7 +468,7 @@ impl Builder {
             .expect("existing profile")
             .extend(pkgs.iter().map(|s| (*s).to_owned()));
     }
-
+*/
     fn package(
         &mut self,
         pkgname: &str,

@@ -1,0 +1,24 @@
+changelog-seen = 2
+
+[build]
+host = ["x86_64-unknown-linux-gnu"]
+target = ["x86_64-unknown-linux-gnu", "riscv32im-risc0-zkvm-elf"]
+build-stage = 1
+install-stage = 1
+test-stage = 1
+docs = false
+extended = true
+tools = ["cargo"]
+
+[rust]
+incremental = true
+
+[llvm]
+download-ci-llvm = true
+
+[install]
+# Change this to your local rust installation directory.  You can then
+# use "rustup toolchain link" to add a toolchain name to point at this
+# installation.
+prefix = "/home/YOURUSERNAME/rustroot"
+sysconfdir = "/home/YOURUSERNAME/rustroot/etc"
