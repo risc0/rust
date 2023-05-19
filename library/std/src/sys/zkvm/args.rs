@@ -34,7 +34,9 @@ impl Iterator for Args {
 
             self.i += 1;
 
-            Some(os::getenv(&varname).unwrap())
+            Some(
+                os::getenv(&varname).expect(&format!("no env var: {}", &varname.to_str().unwrap())),
+            )
         }
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
