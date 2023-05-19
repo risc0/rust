@@ -1,8 +1,5 @@
 use alloc::string::String;
-use core::mem::transmute;
 use core::panic::BoxMeUp;
-use core::ptr::copy_nonoverlapping;
-
 
 // Forward the abort message to libc's android_set_abort_message. We try our best to populate the
 // message but as this function may already be called as part of a failed allocation, it might not be
@@ -27,7 +24,7 @@ pub(crate) unsafe fn zkvm_set_abort_message(payload: *mut &mut dyn BoxMeUp) {
     }
 
     extern "C" {
-         fn sys_panic(msg_ptr: *const u8, len: usize) -> !;
+        fn sys_panic(msg_ptr: *const u8, len: usize) -> !;
     }
 
     sys_panic(msg.as_ptr(), msg.len());

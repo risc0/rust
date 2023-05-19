@@ -10,7 +10,7 @@ pub struct Args {
 
 pub fn args() -> Args {
     let count = os::getenv(&OsString::from("ARGC"))
-        .map(|var| usize::from_str(var.into()).unwrap())
+        .map(|var| usize::from_str(var.to_str().unwrap()).unwrap())
         .unwrap_or(0);
 
     Args { i: 0, count }
@@ -26,11 +26,14 @@ impl Iterator for Args {
     type Item = OsString;
 
     fn next(&mut self) -> Option<OsString> {
-        if i >= self.count {
+        if self.i >= self.count {
             None
         } else {
             let mut varname = OsString::from("ARGV_");
-            varname.push(&self.i.to_string().into());
+            varname.push(&self.i.to_string());
+
+            self.i += 1;
+
             Some(os::getenv(&varname).unwrap())
         }
     }
