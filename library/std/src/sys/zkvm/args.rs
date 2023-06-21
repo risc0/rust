@@ -71,7 +71,7 @@ impl DoubleEndedIterator for Args {
         if self.i_back >= self.count - self.i_forward {
             None
         } else {
-            let arg = Self::argv(self.count - self.i_back);
+            let arg = Self::argv(self.count - 1 - self.i_back);
             self.i_back += 1;
             Some(arg)
         }
