@@ -1,4 +1,4 @@
-use crate::{FnCtxt, RawTy};
+use crate::{errors, FnCtxt, RawTy};
 use rustc_ast as ast;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_errors::{
@@ -19,6 +19,7 @@ use rustc_span::hygiene::DesugaringKind;
 use rustc_span::source_map::{Span, Spanned};
 use rustc_span::symbol::{kw, sym, Ident};
 use rustc_span::{BytePos, DUMMY_SP};
+use rustc_target::abi::FieldIdx;
 use rustc_trait_selection::traits::{ObligationCause, Pattern};
 use ty::VariantDef;
 
@@ -35,6 +36,10 @@ pointers. If you encounter this error you should try to avoid dereferencing the 
 
 You can read more about trait objects in the Trait Objects section of the Reference: \
 https://doc.rust-lang.org/reference/types.html#trait-objects";
+
+fn is_number(text: &str) -> bool {
+    text.chars().all(|c: char| c.is_digit(10))
+}
 
 /// Information about the expected type at the top level of type checking a pattern.
 ///
@@ -238,15 +243,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // Note that there are two tests to check that this remains true
         // (`regions-reassign-{match,let}-bound-pointer.rs`).
         //
-        // 2. Things go horribly wrong if we use subtype. The reason for
-        // THIS is a fairly subtle case involving bound regions. See the
-        // `givens` field in `region_constraints`, as well as the test
+        // 2. An outdated issue related to the old HIR borrowck. See the test
         // `regions-relate-bound-regions-on-closures-to-inference-variables.rs`,
-        // for details. Short version is that we must sometimes detect
-        // relationships between specific region variables and regions
-        // bound in a closure signature, and that detection gets thrown
-        // off when we substitute fresh region variables here to enable
-        // subtyping.
     }
 
     /// Compute the new expected type and default binding mode from the old ones
@@ -395,9 +393,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // They can denote both statically and dynamically-sized byte arrays.
         let mut pat_ty = ty;
         if let hir::ExprKind::Lit(Spanned { node: ast::LitKind::ByteStr(..), .. }) = lt.kind {
-            let expected = self.structurally_resolved_type(span, expected);
-            if let ty::Ref(_, inner_ty, _) = expected.kind()
-                && matches!(inner_ty.kind(), ty::Slice(_))
+            let expected = self.structurally_resolve_type(span, expected);
+            if let ty::Ref(_, inner_ty, _) = *expected.kind()
+                && self.try_structurally_resolve_type(span, inner_ty).is_slice()
             {
                 let tcx = self.tcx;
                 trace!(?lt.hir_id.local_id, "polymorphic byte string lit");
@@ -405,7 +403,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     .borrow_mut()
                     .treat_byte_string_as_slice
                     .insert(lt.hir_id.local_id);
-                pat_ty = tcx.mk_imm_ref(tcx.lifetimes.re_static, tcx.mk_slice(tcx.types.u8));
+                pat_ty = Ty::new_imm_ref(tcx,tcx.lifetimes.re_static, Ty::new_slice(tcx,tcx.types.u8));
             }
         }
 
@@ -414,7 +412,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             let expected = self.resolve_vars_if_possible(expected);
             pat_ty = match expected.kind() {
                 ty::Adt(def, _) if Some(def.did()) == tcx.lang_items().string() => expected,
-                ty::Str => tcx.mk_static_str(),
+                ty::Str => Ty::new_static_str(tcx,),
                 _ => pat_ty,
             };
         }
@@ -476,7 +474,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // There exists a side that didn't meet our criteria that the end-point
             // be of a numeric or char type, as checked in `calc_side` above.
             let guar = self.emit_err_pat_range(span, lhs, rhs);
-            return self.tcx.ty_error(guar);
+            return Ty::new_error(self.tcx, guar);
         }
 
         // Unify each side with `expected`.
@@ -496,14 +494,14 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         demand_eqtype(&mut rhs, lhs);
 
         if let (Some((true, ..)), _) | (_, Some((true, ..))) = (lhs, rhs) {
-            return self.tcx.ty_error_misc();
+            return Ty::new_misc_error(self.tcx);
         }
 
         // Find the unified type and check if it's of numeric or char type again.
         // This check is needed if both sides are inference variables.
         // We require types to be resolved here so that we emit inference failure
         // rather than "_ is not a char or numeric".
-        let ty = self.structurally_resolved_type(span, expected);
+        let ty = self.structurally_resolve_type(span, expected);
         if !(ty.is_numeric() || ty.is_char() || ty.references_error()) {
             if let Some((ref mut fail, _, _)) = lhs {
                 *fail = true;
@@ -512,14 +510,14 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 *fail = true;
             }
             let guar = self.emit_err_pat_range(span, lhs, rhs);
-            return self.tcx.ty_error(guar);
+            return Ty::new_error(self.tcx, guar);
         }
         ty
     }
 
     fn endpoint_has_type(&self, err: &mut Diagnostic, span: Span, ty: Ty<'_>) {
         if !ty.references_error() {
-            err.span_label(span, &format!("this is of type `{}`", ty));
+            err.span_label(span, format!("this is of type `{}`", ty));
         }
     }
 
@@ -546,7 +544,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             format!("this is of type `{}` but it should be `char` or numeric", ty)
         };
         let mut one_side_err = |first_span, first_ty, second: Option<(bool, Ty<'tcx>, Span)>| {
-            err.span_label(first_span, &msg(first_ty));
+            err.span_label(first_span, msg(first_ty));
             if let Some((_, ty, sp)) = second {
                 let ty = self.resolve_vars_if_possible(ty);
                 self.endpoint_has_type(&mut err, sp, ty);
@@ -554,8 +552,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         };
         match (lhs, rhs) {
             (Some((true, lhs_ty, lhs_sp)), Some((true, rhs_ty, rhs_sp))) => {
-                err.span_label(lhs_sp, &msg(lhs_ty));
-                err.span_label(rhs_sp, &msg(rhs_ty));
+                err.span_label(lhs_sp, msg(lhs_ty));
+                err.span_label(rhs_sp, msg(rhs_ty));
             }
             (Some((true, lhs_ty, lhs_sp)), rhs) => one_side_err(lhs_sp, lhs_ty, rhs),
             (lhs, Some((true, rhs_ty, rhs_sp))) => one_side_err(rhs_sp, rhs_ty, lhs),
@@ -596,7 +594,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         debug!("check_pat_ident: pat.hir_id={:?} bm={:?}", pat.hir_id, bm);
 
-        let local_ty = self.local_ty(pat.span, pat.hir_id).decl_ty;
+        let local_ty = self.local_ty(pat.span, pat.hir_id);
         let eq_ty = match bm {
             ty::BindByReference(mutbl) => {
                 // If the binding is like `ref x | ref mut x`,
@@ -637,7 +635,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         ty: Ty<'tcx>,
         ti: TopInfo<'tcx>,
     ) {
-        let var_ty = self.local_ty(span, var_id).decl_ty;
+        let var_ty = self.local_ty(span, var_id);
         if let Some(mut err) = self.demand_eqtype_pat_diag(span, var_ty, ty, ti) {
             let hir = self.tcx.hir();
             let var_ty = self.resolve_vars_with_obligations(var_ty);
@@ -653,7 +651,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 )
             });
             let pre = if in_match { "in the same arm, " } else { "" };
-            err.note(&format!("{}a binding must have the same type in all alternatives", pre));
+            err.note(format!("{}a binding must have the same type in all alternatives", pre));
             self.suggest_adding_missing_ref_or_removing_ref(
                 &mut err,
                 span,
@@ -850,7 +848,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let (variant, pat_ty) = match self.check_struct_path(qpath, pat.hir_id) {
             Ok(data) => data,
             Err(guar) => {
-                let err = self.tcx.ty_error(guar);
+                let err = Ty::new_error(self.tcx, guar);
                 for field in fields {
                     let ti = ti;
                     self.check_pat(field.pat, err, def_bm, ti);
@@ -866,7 +864,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         if self.check_struct_pat_fields(pat_ty, &pat, variant, fields, has_rest_pat, def_bm, ti) {
             pat_ty
         } else {
-            self.tcx.ty_error_misc()
+            Ty::new_misc_error(self.tcx)
         }
     }
 
@@ -886,12 +884,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             Res::Err => {
                 let e = tcx.sess.delay_span_bug(qpath.span(), "`Res::Err` but no error emitted");
                 self.set_tainted_by_errors(e);
-                return tcx.ty_error(e);
+                return Ty::new_error(tcx, e);
             }
             Res::Def(DefKind::AssocFn | DefKind::Ctor(_, CtorKind::Fn) | DefKind::Variant, _) => {
                 let expected = "unit struct, unit variant or constant";
                 let e = report_unexpected_variant_res(tcx, res, qpath, pat.span, "E0533", expected);
-                return tcx.ty_error(e);
+                return Ty::new_error(tcx, e);
             }
             Res::SelfCtor(..)
             | Res::Def(
@@ -960,11 +958,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     ) {
         let pat_span = pat.span;
         if let Some(span) = self.tcx.hir().res_span(pat_res) {
-            e.span_label(span, &format!("{} defined here", res.descr()));
+            e.span_label(span, format!("{} defined here", res.descr()));
             if let [hir::PathSegment { ident, .. }] = &*segments {
                 e.span_label(
                     pat_span,
-                    &format!(
+                    format!(
                         "`{}` is interpreted as {} {}, not a new binding",
                         ident,
                         res.article(),
@@ -1034,7 +1032,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let tcx = self.tcx;
         let on_error = |e| {
             for pat in subpats {
-                self.check_pat(pat, tcx.ty_error(e), def_bm, ti);
+                self.check_pat(pat, Ty::new_error(tcx, e), def_bm, ti);
             }
         };
         let report_unexpected_res = |res: Res| {
@@ -1051,7 +1049,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             let e = tcx.sess.delay_span_bug(pat.span, "`Res::Err` but no error emitted");
             self.set_tainted_by_errors(e);
             on_error(e);
-            return tcx.ty_error(e);
+            return Ty::new_error(tcx, e);
         }
 
         // Type-check the path.
@@ -1059,7 +1057,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             self.instantiate_value_path(segments, opt_ty, res, pat.span, pat.hir_id);
         if !pat_ty.is_fn() {
             let e = report_unexpected_res(res);
-            return tcx.ty_error(e);
+            return Ty::new_error(tcx, e);
         }
 
         let variant = match res {
@@ -1067,11 +1065,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 let e = tcx.sess.delay_span_bug(pat.span, "`Res::Err` but no error emitted");
                 self.set_tainted_by_errors(e);
                 on_error(e);
-                return tcx.ty_error(e);
+                return Ty::new_error(tcx, e);
             }
             Res::Def(DefKind::AssocConst | DefKind::AssocFn, _) => {
                 let e = report_unexpected_res(res);
-                return tcx.ty_error(e);
+                return Ty::new_error(tcx, e);
             }
             Res::Def(DefKind::Ctor(_, CtorKind::Fn), _) => tcx.expect_variant_res(res),
             _ => bug!("unexpected pattern resolution: {:?}", res),
@@ -1098,11 +1096,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 bug!("unexpected pattern type {:?}", pat_ty);
             };
             for (i, subpat) in subpats.iter().enumerate_and_adjust(variant.fields.len(), ddpos) {
-                let field_ty = self.field_ty(subpat.span, &variant.fields[i], substs);
+                let field = &variant.fields[FieldIdx::from_usize(i)];
+                let field_ty = self.field_ty(subpat.span, field, substs);
                 self.check_pat(subpat, field_ty, def_bm, ti);
 
                 self.tcx.check_stability(
-                    variant.fields[i].did,
+                    variant.fields[FieldIdx::from_usize(i)].did,
                     Some(pat.hir_id),
                     subpat.span,
                     None,
@@ -1110,9 +1109,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             }
         } else {
             // Pattern has wrong number of fields.
-            let e = self.e0023(pat.span, res, qpath, subpats, &variant.fields, expected, had_err);
+            let e =
+                self.e0023(pat.span, res, qpath, subpats, &variant.fields.raw, expected, had_err);
             on_error(e);
-            return tcx.ty_error(e);
+            return Ty::new_error(tcx, e);
         }
         pat_ty
     }
@@ -1158,7 +1158,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         );
         err.span_label(
             last_subpat_span,
-            &format!("expected {} field{}, found {}", fields.len(), fields_ending, subpats.len()),
+            format!("expected {} field{}, found {}", fields.len(), fields_ending, subpats.len()),
         );
         if self.tcx.sess.source_map().is_multiline(qpath.span().between(last_subpat_span)) {
             err.span_label(qpath.span(), "");
@@ -1171,7 +1171,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         }
         err.span_label(
             last_field_def_span,
-            &format!("{} has {} field{}", res.descr(), fields.len(), fields_ending),
+            format!("{} has {} field{}", res.descr(), fields.len(), fields_ending),
         );
 
         // Identify the case `Some(x, y)` where the expected type is e.g. `Option<(T, U)>`.
@@ -1289,7 +1289,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let mut expected_len = elements.len();
         if ddpos.as_opt_usize().is_some() {
             // Require known type only when `..` is present.
-            if let ty::Tuple(tys) = self.structurally_resolved_type(span, expected).kind() {
+            if let ty::Tuple(tys) = self.structurally_resolve_type(span, expected).kind() {
                 expected_len = tys.len();
             }
         }
@@ -1303,16 +1303,16 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             )
         });
         let element_tys = tcx.mk_type_list_from_iter(element_tys_iter);
-        let pat_ty = tcx.mk_tup(element_tys);
+        let pat_ty = Ty::new_tup(tcx, element_tys);
         if let Some(mut err) = self.demand_eqtype_pat_diag(span, expected, pat_ty, ti) {
             let reported = err.emit();
             // Walk subpatterns with an expected type of `err` in this case to silence
             // further errors being emitted when using the bindings. #50333
-            let element_tys_iter = (0..max_len).map(|_| tcx.ty_error(reported));
+            let element_tys_iter = (0..max_len).map(|_| Ty::new_error(tcx, reported));
             for (_, elem) in elements.iter().enumerate_and_adjust(max_len, ddpos) {
-                self.check_pat(elem, tcx.ty_error(reported), def_bm, ti);
+                self.check_pat(elem, Ty::new_error(tcx, reported), def_bm, ti);
             }
-            tcx.mk_tup_from_iter(element_tys_iter)
+            Ty::new_tup_from_iter(tcx, element_tys_iter)
         } else {
             for (i, elem) in elements.iter().enumerate_and_adjust(max_len, ddpos) {
                 self.check_pat(elem, element_tys[i], def_bm, ti);
@@ -1340,8 +1340,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // Index the struct fields' types.
         let field_map = variant
             .fields
-            .iter()
-            .enumerate()
+            .iter_enumerated()
             .map(|(i, field)| (field.ident(self.tcx).normalize_to_macros_2_0(), (i, field)))
             .collect::<FxHashMap<_, _>>();
 
@@ -1358,7 +1357,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 Occupied(occupied) => {
                     no_field_errors = false;
                     let guar = self.error_field_already_bound(span, field.ident, *occupied.get());
-                    tcx.ty_error(guar)
+                    Ty::new_error(tcx, guar)
                 }
                 Vacant(vacant) => {
                     vacant.insert(span);
@@ -1372,7 +1371,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         .unwrap_or_else(|| {
                             inexistent_fields.push(field);
                             no_field_errors = false;
-                            tcx.ty_error_misc()
+                            Ty::new_misc_error(tcx)
                         })
                 }
             };
@@ -1411,12 +1410,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // Report an error if an incorrect number of fields was specified.
         if adt.is_union() {
             if fields.len() != 1 {
-                tcx.sess
-                    .struct_span_err(pat.span, "union patterns should have exactly one field")
-                    .emit();
+                tcx.sess.emit_err(errors::UnionPatMultipleFields { span: pat.span });
             }
             if has_rest_pat {
-                tcx.sess.struct_span_err(pat.span, "`..` cannot be used in union patterns").emit();
+                tcx.sess.emit_err(errors::UnionPatDotDot { span: pat.span });
             }
         } else if !unmentioned_fields.is_empty() {
             let accessible_unmentioned_fields: Vec<_> = unmentioned_fields
@@ -1644,7 +1641,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             let unmentioned_field = unmentioned_fields[0].1.name;
                             err.span_suggestion_short(
                                 pat_field.ident.span,
-                                &format!(
+                                format!(
                                     "`{}` has a field named `{}`",
                                     tcx.def_path_str(variant.def_id),
                                     unmentioned_field
@@ -1660,7 +1657,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         if tcx.sess.teach(&err.get_code().unwrap()) {
             err.note(
                 "This error indicates that a struct pattern attempted to \
-                 extract a non-existent field from a struct. Struct fields \
+                 extract a nonexistent field from a struct. Struct fields \
                  are identified by the name used before the colon : so struct \
                  patterns should resemble the declaration of the struct type \
                  being matched.\n\n\
@@ -1678,7 +1675,15 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         fields: &'tcx [hir::PatField<'tcx>],
         variant: &ty::VariantDef,
     ) -> Option<DiagnosticBuilder<'tcx, ErrorGuaranteed>> {
-        if let (Some(CtorKind::Fn), PatKind::Struct(qpath, ..)) = (variant.ctor_kind(), &pat.kind) {
+        if let (Some(CtorKind::Fn), PatKind::Struct(qpath, pattern_fields, ..)) =
+            (variant.ctor_kind(), &pat.kind)
+        {
+            let is_tuple_struct_match = !pattern_fields.is_empty()
+                && pattern_fields.iter().map(|field| field.ident.name.as_str()).all(is_number);
+            if is_tuple_struct_match {
+                return None;
+            }
+
             let path = rustc_hir_pretty::to_string(rustc_hir_pretty::NO_ANN, |s| {
                 s.print_qpath(qpath, false)
             });
@@ -1826,7 +1831,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         lint.help(
             "ensure that all fields are mentioned explicitly by adding the suggested fields",
         );
-        lint.note(&format!(
+        lint.note(format!(
             "the pattern is of type `{}` and the `non_exhaustive_omitted_patterns` attribute was found",
             ty,
         ));
@@ -1890,7 +1895,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         };
         err.span_suggestion(
             sp,
-            &format!(
+            format!(
                 "include the missing field{} in the pattern{}",
                 pluralize!(len),
                 if have_inaccessible_fields { " and ignore the inaccessible fields" } else { "" }
@@ -1900,7 +1905,14 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 prefix,
                 unmentioned_fields
                     .iter()
-                    .map(|(_, name)| name.to_string())
+                    .map(|(_, name)| {
+                        let field_name = name.to_string();
+                        if is_number(&field_name) {
+                            format!("{}: _", field_name)
+                        } else {
+                            field_name
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join(", "),
                 if have_inaccessible_fields { ", .." } else { "" },
@@ -1910,7 +1922,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         );
         err.span_suggestion(
             sp,
-            &format!(
+            format!(
                 "if you don't care about {these} missing field{s}, you can explicitly ignore {them}",
                 these = pluralize!("this", len),
                 s = pluralize!(len),
@@ -1939,12 +1951,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     kind: TypeVariableOriginKind::TypeInference,
                     span: inner.span,
                 });
-                let box_ty = tcx.mk_box(inner_ty);
+                let box_ty = Ty::new_box(tcx, inner_ty);
                 self.demand_eqtype_pat(span, expected, box_ty, ti);
                 (box_ty, inner_ty)
             }
             Err(guar) => {
-                let err = tcx.ty_error(guar);
+                let err = Ty::new_error(tcx, guar);
                 (err, err)
             }
         };
@@ -1995,7 +2007,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 }
             }
             Err(guar) => {
-                let err = tcx.ty_error(guar);
+                let err = Ty::new_error(tcx, guar);
                 (err, err)
             }
         };
@@ -2007,7 +2019,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     fn new_ref_ty(&self, span: Span, mutbl: hir::Mutability, ty: Ty<'tcx>) -> Ty<'tcx> {
         let region = self.next_region_var(infer::PatternRegion(span));
         let mt = ty::TypeAndMut { ty, mutbl };
-        self.tcx.mk_ref(region, mt)
+        Ty::new_ref(self.tcx, region, mt)
     }
 
     /// Type check a slice pattern.
@@ -2030,7 +2042,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         def_bm: BindingMode,
         ti: TopInfo<'tcx>,
     ) -> Ty<'tcx> {
-        let expected = self.structurally_resolved_type(span, expected);
+        let expected = self.structurally_resolve_type(span, expected);
         let (element_ty, opt_slice_ty, inferred) = match *expected.kind() {
             // An array, so we might have something like `let [a, b, c] = [0, 1, 2];`.
             ty::Array(element_ty, len) => {
@@ -2049,7 +2061,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     .error_reported()
                     .err()
                     .unwrap_or_else(|| self.error_expected_array_or_slice(span, expected, ti));
-                let err = self.tcx.ty_error(guar);
+                let err = Ty::new_error(self.tcx, guar);
                 (err, Some(err), err)
             }
         };
@@ -2096,7 +2108,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             } else if let Some(pat_len) = len.checked_sub(min_len) {
                 // The variable-length pattern was there,
                 // so it has an array type with the remaining elements left as its size...
-                return (Some(self.tcx.mk_array(element_ty, pat_len)), arr_ty);
+                return (Some(Ty::new_array(self.tcx, element_ty, pat_len)), arr_ty);
             } else {
                 // ...however, in this case, there were no remaining elements.
                 // That is, the slice pattern requires more than the array type offers.
@@ -2105,7 +2117,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         } else if slice.is_none() {
             // We have a pattern with a fixed length,
             // which we can use to infer the length of the array.
-            let updated_arr_ty = self.tcx.mk_array(element_ty, min_len);
+            let updated_arr_ty = Ty::new_array(self.tcx, element_ty, min_len);
             self.demand_eqtype(span, updated_arr_ty, arr_ty);
             return (None, updated_arr_ty);
         } else {
@@ -2116,7 +2128,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         };
 
         // If we get here, we must have emitted an error.
-        (Some(self.tcx.ty_error(guar)), arr_ty)
+        (Some(Ty::new_error(self.tcx, guar)), arr_ty)
     }
 
     fn error_scrutinee_inconsistent_length(

@@ -4,6 +4,7 @@
 // The proc_macro2 crate handles spans differently when on beta/stable release rather than nightly,
 // changing the output of this test. Since Subdiagnostic is strictly internal to the compiler
 // the test is just ignored on stable and beta:
+// ignore-stage1
 // ignore-beta
 // ignore-stable
 
@@ -11,12 +12,14 @@
 #![crate_type = "lib"]
 
 extern crate rustc_errors;
+extern crate rustc_fluent_macro;
 extern crate rustc_macros;
 extern crate rustc_session;
 extern crate rustc_span;
 
 use rustc_errors::{Applicability, DiagnosticMessage, SubdiagnosticMessage};
-use rustc_macros::{fluent_messages, Subdiagnostic};
+use rustc_fluent_macro::fluent_messages;
+use rustc_macros::Subdiagnostic;
 use rustc_span::Span;
 
 fluent_messages! { "./example.ftl" }
@@ -82,7 +85,7 @@ struct F {
 
 #[derive(Subdiagnostic)]
 #[label(bug = "...")]
-//~^ ERROR `#[label(bug = ...)]` is not a valid attribute
+//~^ ERROR only `no_span` is a valid nested attribute
 //~| ERROR diagnostic slug must be first argument
 struct G {
     #[primary_span]
@@ -92,8 +95,7 @@ struct G {
 
 #[derive(Subdiagnostic)]
 #[label("...")]
-//~^ ERROR `#[label("...")]` is not a valid attribute
-//~| ERROR diagnostic slug must be first argument
+//~^ ERROR unexpected literal in nested attribute, expected ident
 struct H {
     #[primary_span]
     span: Span,
@@ -102,7 +104,7 @@ struct H {
 
 #[derive(Subdiagnostic)]
 #[label(slug = 4)]
-//~^ ERROR `#[label(slug = ...)]` is not a valid attribute
+//~^ ERROR only `no_span` is a valid nested attribute
 //~| ERROR diagnostic slug must be first argument
 struct J {
     #[primary_span]
@@ -112,7 +114,7 @@ struct J {
 
 #[derive(Subdiagnostic)]
 #[label(slug("..."))]
-//~^ ERROR `#[label(slug(...))]` is not a valid attribute
+//~^ ERROR only `no_span` is a valid nested attribute
 //~| ERROR diagnostic slug must be first argument
 struct K {
     #[primary_span]
@@ -132,7 +134,7 @@ struct L {
 
 #[derive(Subdiagnostic)]
 #[label()]
-//~^ ERROR diagnostic slug must be first argument of a `#[label(...)]` attribute
+//~^ ERROR unexpected end of input, unexpected token in nested attribute, expected ident
 struct M {
     #[primary_span]
     span: Span,
@@ -141,7 +143,7 @@ struct M {
 
 #[derive(Subdiagnostic)]
 #[label(no_crate_example, code = "...")]
-//~^ ERROR `#[label(code = ...)]` is not a valid attribute
+//~^ ERROR only `no_span` is a valid nested attribute
 struct N {
     #[primary_span]
     span: Span,
@@ -150,7 +152,7 @@ struct N {
 
 #[derive(Subdiagnostic)]
 #[label(no_crate_example, applicability = "machine-applicable")]
-//~^ ERROR `#[label(applicability = ...)]` is not a valid attribute
+//~^ ERROR only `no_span` is a valid nested attribute
 struct O {
     #[primary_span]
     span: Span,
@@ -222,7 +224,7 @@ enum T {
 enum U {
     #[label(code = "...")]
     //~^ ERROR diagnostic slug must be first argument of a `#[label(...)]` attribute
-    //~| ERROR `#[label(code = ...)]` is not a valid attribute
+    //~| ERROR only `no_span` is a valid nested attribute
     A {
         #[primary_span]
         span: Span,
@@ -323,7 +325,7 @@ struct AD {
 
 #[derive(Subdiagnostic)]
 #[label(no_crate_example, no_crate::example)]
-//~^ ERROR `#[label(no_crate::example)]` is not a valid attribute
+//~^ ERROR a diagnostic slug must be the first argument to the attribute
 struct AE {
     #[primary_span]
     span: Span,
@@ -537,7 +539,7 @@ struct BA {
 #[derive(Subdiagnostic)]
 #[multipart_suggestion(no_crate_example, code = "...", applicability = "machine-applicable")]
 //~^ ERROR multipart suggestion without any `#[suggestion_part(...)]` fields
-//~| ERROR `#[multipart_suggestion(code = ...)]` is not a valid attribute
+//~| ERROR invalid nested attribute
 struct BBa {
     var: String,
 }
@@ -554,7 +556,7 @@ struct BBb {
 #[multipart_suggestion(no_crate_example, applicability = "machine-applicable")]
 struct BBc {
     #[suggestion_part()]
-    //~^ ERROR `#[suggestion_part(...)]` attribute without `code = "..."`
+    //~^ ERROR unexpected end of input, unexpected token in nested attribute, expected ident
     span1: Span,
 }
 
@@ -574,10 +576,11 @@ struct BD {
     //~^ ERROR `#[suggestion_part(...)]` attribute without `code = "..."`
     span1: Span,
     #[suggestion_part()]
-    //~^ ERROR `#[suggestion_part(...)]` attribute without `code = "..."`
+    //~^ ERROR unexpected end of input, unexpected token in nested attribute, expected ident
     span2: Span,
     #[suggestion_part(foo = "bar")]
-    //~^ ERROR `#[suggestion_part(foo = ...)]` is not a valid attribute
+    //~^ ERROR `code` is the only valid nested attribute
+    //~| ERROR expected `,`
     span4: Span,
     #[suggestion_part(code = "...")]
     //~^ ERROR the `#[suggestion_part(...)]` attribute can only be applied to fields of type `Span` or `MultiSpan`
@@ -669,6 +672,7 @@ enum BL {
 struct BM {
     #[suggestion_part(code("foo"))]
     //~^ ERROR expected exactly one string literal for `code = ...`
+    //~| ERROR unexpected token
     span: Span,
     r#type: String,
 }
@@ -678,6 +682,7 @@ struct BM {
 struct BN {
     #[suggestion_part(code("foo", "bar"))]
     //~^ ERROR expected exactly one string literal for `code = ...`
+    //~| ERROR unexpected token
     span: Span,
     r#type: String,
 }
@@ -687,6 +692,7 @@ struct BN {
 struct BO {
     #[suggestion_part(code(3))]
     //~^ ERROR expected exactly one string literal for `code = ...`
+    //~| ERROR unexpected token
     span: Span,
     r#type: String,
 }
@@ -701,10 +707,13 @@ struct BP {
 }
 
 #[derive(Subdiagnostic)]
+//~^ ERROR cannot find value `__code_29` in this scope
+//~| NOTE in this expansion
+//~| NOTE not found in this scope
 #[multipart_suggestion(no_crate_example)]
 struct BQ {
     #[suggestion_part(code = 3)]
-    //~^ ERROR `code = "..."`/`code(...)` must contain only string literals
+    //~^ ERROR expected string literal
     span: Span,
     r#type: String,
 }
@@ -779,7 +788,7 @@ struct SuggestionStyleInvalid1 {
 
 #[derive(Subdiagnostic)]
 #[suggestion(no_crate_example, code = "", style = 42)]
-//~^ ERROR `#[suggestion(style = ...)]` is not a valid attribute
+//~^ ERROR expected `= "xxx"`
 struct SuggestionStyleInvalid2 {
     #[primary_span]
     sub: Span,
@@ -787,7 +796,7 @@ struct SuggestionStyleInvalid2 {
 
 #[derive(Subdiagnostic)]
 #[suggestion(no_crate_example, code = "", style)]
-//~^ ERROR `#[suggestion(style)]` is not a valid attribute
+//~^ ERROR a diagnostic slug must be the first argument to the attribute
 struct SuggestionStyleInvalid3 {
     #[primary_span]
     sub: Span,
@@ -795,7 +804,8 @@ struct SuggestionStyleInvalid3 {
 
 #[derive(Subdiagnostic)]
 #[suggestion(no_crate_example, code = "", style("foo"))]
-//~^ ERROR `#[suggestion(style(...))]` is not a valid attribute
+//~^ ERROR expected `= "xxx"`
+//~| ERROr expected `,`
 struct SuggestionStyleInvalid4 {
     #[primary_span]
     sub: Span,

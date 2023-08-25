@@ -25,7 +25,7 @@ use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
 use rustc_span::{Span, DUMMY_SP};
 use smallvec::{smallvec, SmallVec};
 
-use std::{fmt, iter};
+use std::{fmt, iter, mem};
 
 /// When the main Rust parser encounters a syntax-extension invocation, it
 /// parses the arguments to the invocation as a token tree. This is a very
@@ -48,14 +48,15 @@ pub enum TokenTree {
     Delimited(DelimSpan, Delimiter, TokenStream),
 }
 
-// Ensure all fields of `TokenTree` is `Send` and `Sync`.
+// Ensure all fields of `TokenTree` are `DynSend` and `DynSync`.
 #[cfg(parallel_compiler)]
 fn _dummy()
 where
-    Token: Send + Sync,
-    DelimSpan: Send + Sync,
-    Delimiter: Send + Sync,
-    TokenStream: Send + Sync,
+    Token: sync::DynSend + sync::DynSync,
+    Spacing: sync::DynSend + sync::DynSync,
+    DelimSpan: sync::DynSend + sync::DynSync,
+    Delimiter: sync::DynSend + sync::DynSync,
+    TokenStream: sync::DynSend + sync::DynSync,
 {
 }
 
@@ -118,7 +119,7 @@ where
     }
 }
 
-pub trait ToAttrTokenStream: sync::Send + sync::Sync {
+pub trait ToAttrTokenStream: sync::DynSend + sync::DynSync {
     fn to_attr_token_stream(&self) -> AttrTokenStream;
 }
 
@@ -409,8 +410,17 @@ impl TokenStream {
         t1.next().is_none() && t2.next().is_none()
     }
 
-    pub fn map_enumerated<F: FnMut(usize, &TokenTree) -> TokenTree>(self, mut f: F) -> TokenStream {
-        TokenStream(Lrc::new(self.0.iter().enumerate().map(|(i, tree)| f(i, tree)).collect()))
+    /// Applies the supplied function to each `TokenTree` and its index in `self`, returning a new `TokenStream`
+    ///
+    /// It is equivalent to `TokenStream::new(self.trees().cloned().enumerate().map(|(i, tt)| f(i, tt)).collect())`.
+    pub fn map_enumerated_owned(
+        mut self,
+        mut f: impl FnMut(usize, TokenTree) -> TokenTree,
+    ) -> TokenStream {
+        let owned = Lrc::make_mut(&mut self.0); // clone if necessary
+        // rely on vec's in-place optimizations to avoid another allocation
+        *owned = mem::take(owned).into_iter().enumerate().map(|(i, tree)| f(i, tree)).collect();
+        self
     }
 
     /// Create a token stream containing a single token with alone spacing.
@@ -549,6 +559,10 @@ impl TokenStream {
             // Append all of `stream`.
             vec_mut.extend(stream_iter);
         }
+    }
+
+    pub fn chunks(&self, chunk_size: usize) -> core::slice::Chunks<'_, TokenTree> {
+        self.0.chunks(chunk_size)
     }
 }
 

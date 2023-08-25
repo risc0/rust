@@ -17,10 +17,11 @@ use rustc_hir::def_id::{DefId, LOCAL_CRATE};
 use rustc_middle::mir;
 use rustc_middle::mir::interpret::ConstValue;
 use rustc_middle::ty::subst::{GenericArgKind, SubstsRef};
-use rustc_middle::ty::{self, DefIdTree, TyCtxt};
+use rustc_middle::ty::{self, TyCtxt};
 use rustc_span::symbol::{kw, sym, Symbol};
 use std::fmt::Write as _;
 use std::mem;
+use std::sync::LazyLock as Lazy;
 use thin_vec::{thin_vec, ThinVec};
 
 #[cfg(test)]
@@ -73,8 +74,9 @@ pub(crate) fn krate(cx: &mut DocContext<'_>) -> Crate {
 
 pub(crate) fn substs_to_args<'tcx>(
     cx: &mut DocContext<'tcx>,
-    substs: ty::Binder<'tcx, &[ty::subst::GenericArg<'tcx>]>,
+    substs: ty::Binder<'tcx, &'tcx [ty::subst::GenericArg<'tcx>]>,
     mut skip_first: bool,
+    container: Option<DefId>,
 ) -> Vec<GenericArg> {
     let mut ret_val =
         Vec::with_capacity(substs.skip_binder().len().saturating_sub(if skip_first {
@@ -82,19 +84,29 @@ pub(crate) fn substs_to_args<'tcx>(
         } else {
             0
         }));
-    ret_val.extend(substs.iter().filter_map(|kind| match kind.skip_binder().unpack() {
-        GenericArgKind::Lifetime(lt) => {
-            Some(GenericArg::Lifetime(clean_middle_region(lt).unwrap_or(Lifetime::elided())))
-        }
-        GenericArgKind::Type(_) if skip_first => {
-            skip_first = false;
-            None
-        }
-        GenericArgKind::Type(ty) => {
-            Some(GenericArg::Type(clean_middle_ty(kind.rebind(ty), cx, None)))
-        }
-        GenericArgKind::Const(ct) => {
-            Some(GenericArg::Const(Box::new(clean_middle_const(kind.rebind(ct), cx))))
+
+    ret_val.extend(substs.iter().enumerate().filter_map(|(index, kind)| {
+        match kind.skip_binder().unpack() {
+            GenericArgKind::Lifetime(lt) => {
+                Some(GenericArg::Lifetime(clean_middle_region(lt).unwrap_or(Lifetime::elided())))
+            }
+            GenericArgKind::Type(_) if skip_first => {
+                skip_first = false;
+                None
+            }
+            GenericArgKind::Type(ty) => Some(GenericArg::Type(clean_middle_ty(
+                kind.rebind(ty),
+                cx,
+                None,
+                container.map(|container| crate::clean::ContainerTy::Regular {
+                    ty: container,
+                    substs,
+                    arg: index,
+                }),
+            ))),
+            GenericArgKind::Const(ct) => {
+                Some(GenericArg::Const(Box::new(clean_middle_const(kind.rebind(ct), cx))))
+            }
         }
     }));
     ret_val
@@ -107,7 +119,7 @@ fn external_generic_args<'tcx>(
     bindings: ThinVec<TypeBinding>,
     substs: ty::Binder<'tcx, SubstsRef<'tcx>>,
 ) -> GenericArgs {
-    let args = substs_to_args(cx, substs.map_bound(|substs| &substs[..]), has_self);
+    let args = substs_to_args(cx, substs.map_bound(|substs| &substs[..]), has_self, Some(did));
 
     if cx.tcx.fn_trait_kind_from_def_id(did).is_some() {
         let ty = substs
@@ -118,7 +130,7 @@ fn external_generic_args<'tcx>(
         let inputs =
             // The trait's first substitution is the one after self, if there is one.
             match ty.skip_binder().kind() {
-                ty::Tuple(tys) => tys.iter().map(|t| clean_middle_ty(ty.rebind(t), cx, None)).collect::<Vec<_>>().into(),
+                ty::Tuple(tys) => tys.iter().map(|t| clean_middle_ty(ty.rebind(t), cx, None, None)).collect::<Vec<_>>().into(),
                 _ => return GenericArgs::AngleBracketed { args: args.into(), bindings },
             };
         let output = bindings.into_iter().next().and_then(|binding| match binding.kind {
@@ -193,14 +205,14 @@ pub(crate) fn build_deref_target_impls(
         };
 
         if let Some(prim) = target.primitive_type() {
-            let _prof_timer = cx.tcx.sess.prof.generic_activity("build_primitive_inherent_impls");
+            let _prof_timer = tcx.sess.prof.generic_activity("build_primitive_inherent_impls");
             for did in prim.impls(tcx).filter(|did| !did.is_local()) {
-                inline::build_impl(cx, None, did, None, ret);
+                inline::build_impl(cx, did, None, ret);
             }
         } else if let Type::Path { path } = target {
             let did = path.def_id();
             if !did.is_local() {
-                inline::build_impls(cx, None, did, None, ret);
+                inline::build_impls(cx, did, None, ret);
             }
         }
     }
@@ -243,9 +255,9 @@ pub(crate) fn print_const(cx: &DocContext<'_>, n: ty::Const<'_>) -> String {
     match n.kind() {
         ty::ConstKind::Unevaluated(ty::UnevaluatedConst { def, substs: _ }) => {
             let s = if let Some(def) = def.as_local() {
-                print_const_expr(cx.tcx, cx.tcx.hir().body_owned_by(def.did))
+                print_const_expr(cx.tcx, cx.tcx.hir().body_owned_by(def))
             } else {
-                inline::print_inlined_const(cx.tcx, def.did)
+                inline::print_inlined_const(cx.tcx, def)
             };
 
             s
@@ -571,6 +583,8 @@ pub(crate) fn has_doc_flag(tcx: TyCtxt<'_>, did: DefId, flag: Symbol) -> bool {
 ///
 /// Set by `bootstrap::Builder::doc_rust_lang_org_channel` in order to keep tests passing on beta/stable.
 pub(crate) const DOC_RUST_LANG_ORG_CHANNEL: &str = env!("DOC_RUST_LANG_ORG_CHANNEL");
+pub(crate) static DOC_CHANNEL: Lazy<&'static str> =
+    Lazy::new(|| DOC_RUST_LANG_ORG_CHANNEL.rsplit("/").filter(|c| !c.is_empty()).next().unwrap());
 
 /// Render a sequence of macro arms in a format suitable for displaying to the user
 /// as part of an item declaration.
@@ -594,9 +608,8 @@ pub(super) fn display_macro_source(
     def_id: DefId,
     vis: ty::Visibility<DefId>,
 ) -> String {
-    let tts: Vec<_> = def.body.tokens.clone().into_trees().collect();
     // Extract the spans of all matchers. They represent the "interface" of the macro.
-    let matchers = tts.chunks(4).map(|arm| &arm[0]);
+    let matchers = def.body.tokens.chunks(4).map(|arm| &arm[0]);
 
     if def.macro_rules {
         format!("macro_rules! {} {{\n{}}}", name, render_macro_arms(cx.tcx, matchers, ";"))

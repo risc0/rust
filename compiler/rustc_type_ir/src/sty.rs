@@ -36,8 +36,17 @@ pub enum DynKind {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 #[derive(Encodable, Decodable, HashStable_Generic)]
 pub enum AliasKind {
+    /// A projection `<Type as Trait>::AssocType`.
+    /// Can get normalized away if monomorphic enough.
     Projection,
+    Inherent,
+    /// An opaque type (usually from `impl Trait` in type aliases or function return types)
+    /// Can only be normalized away in RevealAll mode
     Opaque,
+    /// A type alias that actually checks its trait bounds.
+    /// Currently only used if the type alias references opaque types.
+    /// Can always be normalized away.
+    Weak,
 }
 
 /// Defines the kinds of types used by the type system.
@@ -167,7 +176,7 @@ pub enum TyKind<I: Interner> {
     /// lifetimes bound by the witness itself.
     ///
     /// This variant is only using when `drop_tracking_mir` is set.
-    /// This contains the `DefId` and the `SubstRef` of the generator.
+    /// This contains the `DefId` and the `SubstsRef` of the generator.
     /// The actual witness types are computed on MIR by the `mir_generator_witnesses` query.
     ///
     /// Looking at the following example, the witness for this generator
@@ -203,6 +212,10 @@ pub enum TyKind<I: Interner> {
     /// `for<'a, T> &'a (): Trait<T>` and then convert the introduced bound variables
     /// back to inference variables in a new inference context when inside of the query.
     ///
+    /// It is conventional to render anonymous bound types like `^N` or `^D_N`,
+    /// where `N` is the bound variable's anonymous index into the binder, and
+    /// `D` is the debruijn index, or totally omitted if the debruijn index is zero.
+    ///
     /// See the `rustc-dev-guide` for more details about
     /// [higher-ranked trait bounds][1] and [canonical queries][2].
     ///
@@ -212,6 +225,12 @@ pub enum TyKind<I: Interner> {
 
     /// A placeholder type, used during higher ranked subtyping to instantiate
     /// bound variables.
+    ///
+    /// It is conventional to render anonymous placeholer types like `!N` or `!U_N`,
+    /// where `N` is the placeholder variable's anonymous index (which corresponds
+    /// to the bound variable's index from the binder from which it was instantiated),
+    /// and `U` is the universe index in which it is instantiated, or totally omitted
+    /// if the universe index is zero.
     Placeholder(I::PlaceholderType),
 
     /// A type variable used during type checking.
@@ -283,7 +302,7 @@ impl<I: Interner> Clone for TyKind<I> {
             Str => Str,
             Array(t, c) => Array(t.clone(), c.clone()),
             Slice(t) => Slice(t.clone()),
-            RawPtr(t) => RawPtr(t.clone()),
+            RawPtr(p) => RawPtr(p.clone()),
             Ref(r, t, m) => Ref(r.clone(), t.clone(), m.clone()),
             FnDef(d, s) => FnDef(d.clone(), s.clone()),
             FnPtr(s) => FnPtr(s.clone()),
@@ -488,33 +507,65 @@ impl<I: Interner> hash::Hash for TyKind<I> {
 impl<I: Interner> fmt::Debug for TyKind<I> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Bool => f.write_str("Bool"),
-            Char => f.write_str("Char"),
-            Int(i) => f.debug_tuple_field1_finish("Int", i),
-            Uint(u) => f.debug_tuple_field1_finish("Uint", u),
-            Float(float) => f.debug_tuple_field1_finish("Float", float),
+            Bool => write!(f, "bool"),
+            Char => write!(f, "char"),
+            Int(i) => write!(f, "{i:?}"),
+            Uint(u) => write!(f, "{u:?}"),
+            Float(float) => write!(f, "{float:?}"),
             Adt(d, s) => f.debug_tuple_field2_finish("Adt", d, s),
             Foreign(d) => f.debug_tuple_field1_finish("Foreign", d),
-            Str => f.write_str("Str"),
-            Array(t, c) => f.debug_tuple_field2_finish("Array", t, c),
-            Slice(t) => f.debug_tuple_field1_finish("Slice", t),
-            RawPtr(t) => f.debug_tuple_field1_finish("RawPtr", t),
-            Ref(r, t, m) => f.debug_tuple_field3_finish("Ref", r, t, m),
+            Str => write!(f, "str"),
+            Array(t, c) => write!(f, "[{t:?}; {c:?}]"),
+            Slice(t) => write!(f, "[{t:?}]"),
+            RawPtr(p) => {
+                let (ty, mutbl) = I::ty_and_mut_to_parts(p.clone());
+                match I::mutability_is_mut(mutbl) {
+                    true => write!(f, "*mut "),
+                    false => write!(f, "*const "),
+                }?;
+                write!(f, "{ty:?}")
+            }
+            Ref(r, t, m) => match I::mutability_is_mut(m.clone()) {
+                true => write!(f, "&{r:?} mut {t:?}"),
+                false => write!(f, "&{r:?} {t:?}"),
+            },
             FnDef(d, s) => f.debug_tuple_field2_finish("FnDef", d, s),
-            FnPtr(s) => f.debug_tuple_field1_finish("FnPtr", s),
-            Dynamic(p, r, repr) => f.debug_tuple_field3_finish("Dynamic", p, r, repr),
+            FnPtr(s) => write!(f, "{s:?}"),
+            Dynamic(p, r, repr) => match repr {
+                DynKind::Dyn => write!(f, "dyn {p:?} + {r:?}"),
+                DynKind::DynStar => write!(f, "dyn* {p:?} + {r:?}"),
+            },
             Closure(d, s) => f.debug_tuple_field2_finish("Closure", d, s),
             Generator(d, s, m) => f.debug_tuple_field3_finish("Generator", d, s, m),
             GeneratorWitness(g) => f.debug_tuple_field1_finish("GeneratorWitness", g),
             GeneratorWitnessMIR(d, s) => f.debug_tuple_field2_finish("GeneratorWitnessMIR", d, s),
-            Never => f.write_str("Never"),
-            Tuple(t) => f.debug_tuple_field1_finish("Tuple", t),
+            Never => write!(f, "!"),
+            Tuple(t) => {
+                let mut iter = t.clone().into_iter();
+
+                write!(f, "(")?;
+
+                match iter.next() {
+                    None => return write!(f, ")"),
+                    Some(ty) => write!(f, "{ty:?}")?,
+                };
+
+                match iter.next() {
+                    None => return write!(f, ",)"),
+                    Some(ty) => write!(f, "{ty:?})")?,
+                }
+
+                for ty in iter {
+                    write!(f, ", {ty:?}")?;
+                }
+                write!(f, ")")
+            }
             Alias(i, a) => f.debug_tuple_field2_finish("Alias", i, a),
-            Param(p) => f.debug_tuple_field1_finish("Param", p),
-            Bound(d, b) => f.debug_tuple_field2_finish("Bound", d, b),
-            Placeholder(p) => f.debug_tuple_field1_finish("Placeholder", p),
-            Infer(t) => f.debug_tuple_field1_finish("Infer", t),
-            TyKind::Error(e) => f.debug_tuple_field1_finish("Error", e),
+            Param(p) => write!(f, "{p:?}"),
+            Bound(d, b) => crate::debug_bound_var(f, *d, b),
+            Placeholder(p) => write!(f, "{p:?}"),
+            Infer(t) => write!(f, "{t:?}"),
+            TyKind::Error(_) => write!(f, "{{type error}}"),
         }
     }
 }
@@ -821,6 +872,224 @@ where
             Error(d) => {
                 d.hash_stable(__hcx, __hasher);
             }
+        }
+    }
+}
+
+/// Represents a constant in Rust.
+// #[derive(derive_more::From)]
+pub enum ConstKind<I: Interner> {
+    /// A const generic parameter.
+    Param(I::ParamConst),
+
+    /// Infer the value of the const.
+    Infer(I::InferConst),
+
+    /// Bound const variable, used only when preparing a trait query.
+    Bound(DebruijnIndex, I::BoundConst),
+
+    /// A placeholder const - universally quantified higher-ranked const.
+    Placeholder(I::PlaceholderConst),
+
+    /// An unnormalized const item such as an anon const or assoc const or free const item.
+    /// Right now anything other than anon consts does not actually work properly but this
+    /// should
+    Unevaluated(I::AliasConst),
+
+    /// Used to hold computed value.
+    Value(I::ValueConst),
+
+    /// A placeholder for a const which could not be computed; this is
+    /// propagated to avoid useless error messages.
+    Error(I::ErrorGuaranteed),
+
+    /// Unevaluated non-const-item, used by `feature(generic_const_exprs)` to represent
+    /// const arguments such as `N + 1` or `foo(N)`
+    Expr(I::ExprConst),
+}
+
+const fn const_kind_discriminant<I: Interner>(value: &ConstKind<I>) -> usize {
+    match value {
+        ConstKind::Param(_) => 0,
+        ConstKind::Infer(_) => 1,
+        ConstKind::Bound(_, _) => 2,
+        ConstKind::Placeholder(_) => 3,
+        ConstKind::Unevaluated(_) => 4,
+        ConstKind::Value(_) => 5,
+        ConstKind::Error(_) => 6,
+        ConstKind::Expr(_) => 7,
+    }
+}
+
+impl<I: Interner> hash::Hash for ConstKind<I> {
+    fn hash<H: hash::Hasher>(&self, state: &mut H) {
+        const_kind_discriminant(self).hash(state);
+        match self {
+            ConstKind::Param(p) => p.hash(state),
+            ConstKind::Infer(i) => i.hash(state),
+            ConstKind::Bound(d, b) => {
+                d.hash(state);
+                b.hash(state);
+            }
+            ConstKind::Placeholder(p) => p.hash(state),
+            ConstKind::Unevaluated(u) => u.hash(state),
+            ConstKind::Value(v) => v.hash(state),
+            ConstKind::Error(e) => e.hash(state),
+            ConstKind::Expr(e) => e.hash(state),
+        }
+    }
+}
+
+impl<CTX: HashStableContext, I: Interner> HashStable<CTX> for ConstKind<I>
+where
+    I::ParamConst: HashStable<CTX>,
+    I::InferConst: HashStable<CTX>,
+    I::BoundConst: HashStable<CTX>,
+    I::PlaceholderConst: HashStable<CTX>,
+    I::AliasConst: HashStable<CTX>,
+    I::ValueConst: HashStable<CTX>,
+    I::ErrorGuaranteed: HashStable<CTX>,
+    I::ExprConst: HashStable<CTX>,
+{
+    fn hash_stable(
+        &self,
+        hcx: &mut CTX,
+        hasher: &mut rustc_data_structures::stable_hasher::StableHasher,
+    ) {
+        const_kind_discriminant(self).hash_stable(hcx, hasher);
+        match self {
+            ConstKind::Param(p) => p.hash_stable(hcx, hasher),
+            ConstKind::Infer(i) => i.hash_stable(hcx, hasher),
+            ConstKind::Bound(d, b) => {
+                d.hash_stable(hcx, hasher);
+                b.hash_stable(hcx, hasher);
+            }
+            ConstKind::Placeholder(p) => p.hash_stable(hcx, hasher),
+            ConstKind::Unevaluated(u) => u.hash_stable(hcx, hasher),
+            ConstKind::Value(v) => v.hash_stable(hcx, hasher),
+            ConstKind::Error(e) => e.hash_stable(hcx, hasher),
+            ConstKind::Expr(e) => e.hash_stable(hcx, hasher),
+        }
+    }
+}
+
+impl<I: Interner, D: TyDecoder<I = I>> Decodable<D> for ConstKind<I>
+where
+    I::ParamConst: Decodable<D>,
+    I::InferConst: Decodable<D>,
+    I::BoundConst: Decodable<D>,
+    I::PlaceholderConst: Decodable<D>,
+    I::AliasConst: Decodable<D>,
+    I::ValueConst: Decodable<D>,
+    I::ErrorGuaranteed: Decodable<D>,
+    I::ExprConst: Decodable<D>,
+{
+    fn decode(d: &mut D) -> Self {
+        match Decoder::read_usize(d) {
+            0 => ConstKind::Param(Decodable::decode(d)),
+            1 => ConstKind::Infer(Decodable::decode(d)),
+            2 => ConstKind::Bound(Decodable::decode(d), Decodable::decode(d)),
+            3 => ConstKind::Placeholder(Decodable::decode(d)),
+            4 => ConstKind::Unevaluated(Decodable::decode(d)),
+            5 => ConstKind::Value(Decodable::decode(d)),
+            6 => ConstKind::Error(Decodable::decode(d)),
+            7 => ConstKind::Expr(Decodable::decode(d)),
+            _ => panic!(
+                "{}",
+                format!(
+                    "invalid enum variant tag while decoding `{}`, expected 0..{}",
+                    "ConstKind", 8,
+                )
+            ),
+        }
+    }
+}
+
+impl<I: Interner, E: TyEncoder<I = I>> Encodable<E> for ConstKind<I>
+where
+    I::ParamConst: Encodable<E>,
+    I::InferConst: Encodable<E>,
+    I::BoundConst: Encodable<E>,
+    I::PlaceholderConst: Encodable<E>,
+    I::AliasConst: Encodable<E>,
+    I::ValueConst: Encodable<E>,
+    I::ErrorGuaranteed: Encodable<E>,
+    I::ExprConst: Encodable<E>,
+{
+    fn encode(&self, e: &mut E) {
+        let disc = const_kind_discriminant(self);
+        match self {
+            ConstKind::Param(p) => e.emit_enum_variant(disc, |e| p.encode(e)),
+            ConstKind::Infer(i) => e.emit_enum_variant(disc, |e| i.encode(e)),
+            ConstKind::Bound(d, b) => e.emit_enum_variant(disc, |e| {
+                d.encode(e);
+                b.encode(e);
+            }),
+            ConstKind::Placeholder(p) => e.emit_enum_variant(disc, |e| p.encode(e)),
+            ConstKind::Unevaluated(u) => e.emit_enum_variant(disc, |e| u.encode(e)),
+            ConstKind::Value(v) => e.emit_enum_variant(disc, |e| v.encode(e)),
+            ConstKind::Error(er) => e.emit_enum_variant(disc, |e| er.encode(e)),
+            ConstKind::Expr(ex) => e.emit_enum_variant(disc, |e| ex.encode(e)),
+        }
+    }
+}
+
+impl<I: Interner> PartialOrd for ConstKind<I> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<I: Interner> Ord for ConstKind<I> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        const_kind_discriminant(self)
+            .cmp(&const_kind_discriminant(other))
+            .then_with(|| match (self, other) {
+                (ConstKind::Param(p1), ConstKind::Param(p2)) => p1.cmp(p2),
+                (ConstKind::Infer(i1), ConstKind::Infer(i2)) => i1.cmp(i2),
+                (ConstKind::Bound(d1, b1), ConstKind::Bound(d2, b2)) => d1.cmp(d2).then_with(|| b1.cmp(b2)),
+                (ConstKind::Placeholder(p1), ConstKind::Placeholder(p2)) => p1.cmp(p2),
+                (ConstKind::Unevaluated(u1), ConstKind::Unevaluated(u2)) => u1.cmp(u2),
+                (ConstKind::Value(v1), ConstKind::Value(v2)) => v1.cmp(v2),
+                (ConstKind::Error(e1), ConstKind::Error(e2)) => e1.cmp(e2),
+                (ConstKind::Expr(e1), ConstKind::Expr(e2)) => e1.cmp(e2),
+                _ => {
+                    debug_assert!(false, "This branch must be unreachable, maybe the match is missing an arm? self = {self:?}, other = {other:?}");
+                    Ordering::Equal
+                }
+            })
+    }
+}
+
+impl<I: Interner> PartialEq for ConstKind<I> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Param(l0), Self::Param(r0)) => l0 == r0,
+            (Self::Infer(l0), Self::Infer(r0)) => l0 == r0,
+            (Self::Bound(l0, l1), Self::Bound(r0, r1)) => l0 == r0 && l1 == r1,
+            (Self::Placeholder(l0), Self::Placeholder(r0)) => l0 == r0,
+            (Self::Unevaluated(l0), Self::Unevaluated(r0)) => l0 == r0,
+            (Self::Value(l0), Self::Value(r0)) => l0 == r0,
+            (Self::Error(l0), Self::Error(r0)) => l0 == r0,
+            (Self::Expr(l0), Self::Expr(r0)) => l0 == r0,
+            _ => false,
+        }
+    }
+}
+
+impl<I: Interner> Eq for ConstKind<I> {}
+
+impl<I: Interner> Clone for ConstKind<I> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Param(arg0) => Self::Param(arg0.clone()),
+            Self::Infer(arg0) => Self::Infer(arg0.clone()),
+            Self::Bound(arg0, arg1) => Self::Bound(arg0.clone(), arg1.clone()),
+            Self::Placeholder(arg0) => Self::Placeholder(arg0.clone()),
+            Self::Unevaluated(arg0) => Self::Unevaluated(arg0.clone()),
+            Self::Value(arg0) => Self::Value(arg0.clone()),
+            Self::Error(arg0) => Self::Error(arg0.clone()),
+            Self::Expr(arg0) => Self::Expr(arg0.clone()),
         }
     }
 }

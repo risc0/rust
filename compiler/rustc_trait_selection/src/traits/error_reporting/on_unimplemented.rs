@@ -41,7 +41,6 @@ pub trait TypeErrCtxtExt<'tcx> {
 static ALLOWED_FORMAT_SYMBOLS: &[Symbol] = &[
     kw::SelfUpper,
     sym::ItemContext,
-    sym::from_method,
     sym::from_desugaring,
     sym::direct,
     sym::cause,
@@ -149,9 +148,17 @@ impl<'tcx> TypeErrCtxtExt<'tcx> for TypeErrCtxt<'_, 'tcx> {
             .unwrap_or_else(|| (trait_ref.def_id(), trait_ref.skip_binder().substs));
         let trait_ref = trait_ref.skip_binder();
 
-        let body_hir = self.tcx.hir().local_def_id_to_hir_id(obligation.cause.body_id);
-        let mut flags =
-            vec![(sym::ItemContext, self.describe_enclosure(body_hir).map(|s| s.to_owned()))];
+        let mut flags = vec![];
+        // FIXME(-Zlower-impl-trait-in-trait-to-assoc-ty): HIR is not present for RPITITs,
+        // but I guess we could synthesize one here. We don't see any errors that rely on
+        // that yet, though.
+        let enclosure =
+            if let Some(body_hir) = self.tcx.opt_local_def_id_to_hir_id(obligation.cause.body_id) {
+                self.describe_enclosure(body_hir).map(|s| s.to_owned())
+            } else {
+                None
+            };
+        flags.push((sym::ItemContext, enclosure));
 
         match obligation.cause.code() {
             ObligationCauseCode::BuiltinDerivedObligation(..)
@@ -161,23 +168,6 @@ impl<'tcx> TypeErrCtxtExt<'tcx> for TypeErrCtxt<'_, 'tcx> {
                 // this is a "direct", user-specified, rather than derived,
                 // obligation.
                 flags.push((sym::direct, None));
-            }
-        }
-
-        if let ObligationCauseCode::ItemObligation(item)
-        | ObligationCauseCode::BindingObligation(item, _)
-        | ObligationCauseCode::ExprItemObligation(item, ..)
-        | ObligationCauseCode::ExprBindingObligation(item, ..) = *obligation.cause.code()
-        {
-            // FIXME: maybe also have some way of handling methods
-            // from other traits? That would require name resolution,
-            // which we might want to be some sort of hygienic.
-            //
-            // Currently I'm leaving it for what I need for `try`.
-            if self.tcx.trait_of_item(item) == Some(trait_ref.def_id) {
-                let method = self.tcx.item_name(item);
-                flags.push((sym::from_method, None));
-                flags.push((sym::from_method, Some(method.to_string())));
             }
         }
 
@@ -270,7 +260,7 @@ impl<'tcx> TypeErrCtxtExt<'tcx> for TypeErrCtxt<'_, 'tcx> {
             // Arrays give us `[]`, `[{ty}; _]` and `[{ty}; N]`
             if let ty::Array(aty, len) = self_ty.kind() {
                 flags.push((sym::_Self, Some("[]".to_string())));
-                let len = len.kind().try_to_value().and_then(|v| v.try_to_target_usize(self.tcx));
+                let len = len.try_to_value().and_then(|v| v.try_to_target_usize(self.tcx));
                 flags.push((sym::_Self, Some(format!("[{}; _]", aty))));
                 if let Some(n) = len {
                     flags.push((sym::_Self, Some(format!("[{}; {}]", aty, n))));
@@ -298,6 +288,14 @@ impl<'tcx> TypeErrCtxtExt<'tcx> for TypeErrCtxt<'_, 'tcx> {
                     }
                 }
             }
+
+            // `&[{integral}]` - `FromIterator` needs that.
+            if let ty::Ref(_, ref_ty, rustc_ast::Mutability::Not) = self_ty.kind()
+                && let ty::Slice(sty) = ref_ty.kind()
+                && sty.is_integral()
+            {
+                flags.push((sym::_Self, Some("&[{integral}]".to_owned())));
+            }
         });
 
         if let Ok(Some(command)) = OnUnimplementedDirective::of_item(self.tcx, def_id) {
@@ -319,7 +317,7 @@ pub struct OnUnimplementedDirective {
     pub label: Option<OnUnimplementedFormatString>,
     pub note: Option<OnUnimplementedFormatString>,
     pub parent_label: Option<OnUnimplementedFormatString>,
-    pub append_const_msg: Option<Option<Symbol>>,
+    pub append_const_msg: Option<AppendConstMessage>,
 }
 
 /// For the `#[rustc_on_unimplemented]` attribute
@@ -329,11 +327,21 @@ pub struct OnUnimplementedNote {
     pub label: Option<String>,
     pub note: Option<String>,
     pub parent_label: Option<String>,
-    /// Append a message for `~const Trait` errors. `None` means not requested and
-    /// should fallback to a generic message, `Some(None)` suggests using the default
-    /// appended message, `Some(Some(s))` suggests use the `s` message instead of the
-    /// default one..
-    pub append_const_msg: Option<Option<Symbol>>,
+    // If none, should fall back to a generic message
+    pub append_const_msg: Option<AppendConstMessage>,
+}
+
+/// Append a message for `~const Trait` errors.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AppendConstMessage {
+    Default,
+    Custom(Symbol),
+}
+
+impl Default for AppendConstMessage {
+    fn default() -> Self {
+        AppendConstMessage::Default
+    }
 }
 
 impl<'tcx> OnUnimplementedDirective {
@@ -411,10 +419,10 @@ impl<'tcx> OnUnimplementedDirective {
                 }
             } else if item.has_name(sym::append_const_msg) && append_const_msg.is_none() {
                 if let Some(msg) = item.value_str() {
-                    append_const_msg = Some(Some(msg));
+                    append_const_msg = Some(AppendConstMessage::Custom(msg));
                     continue;
                 } else if item.is_word() {
-                    append_const_msg = Some(None);
+                    append_const_msg = Some(AppendConstMessage::Default);
                     continue;
                 }
             }
@@ -646,7 +654,7 @@ impl<'tcx> OnUnimplementedFormatString {
                             None => {
                                 if let Some(val) = options.get(&s) {
                                     val
-                                } else if s == sym::from_desugaring || s == sym::from_method {
+                                } else if s == sym::from_desugaring {
                                     // don't break messages using these two arguments incorrectly
                                     &empty_string
                                 } else if s == sym::ItemContext {

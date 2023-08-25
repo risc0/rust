@@ -92,10 +92,8 @@ pub type CanonicalTypeOpProvePredicateGoal<'tcx> =
 pub type CanonicalTypeOpNormalizeGoal<'tcx, T> =
     Canonical<'tcx, ty::ParamEnvAnd<'tcx, type_op::Normalize<T>>>;
 
-#[derive(Copy, Clone, Debug, HashStable, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Hash, HashStable, PartialEq, Eq)]
 pub struct NoSolution;
-
-pub type Fallible<T> = Result<T, NoSolution>;
 
 impl<'tcx> From<TypeError<'tcx>> for NoSolution {
     fn from(_: TypeError<'tcx>) -> NoSolution {

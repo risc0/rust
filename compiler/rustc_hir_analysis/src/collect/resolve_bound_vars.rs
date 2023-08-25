@@ -17,11 +17,12 @@ use rustc_hir::{GenericArg, GenericParam, GenericParamKind, HirIdMap, LifetimeNa
 use rustc_middle::bug;
 use rustc_middle::hir::nested_filter;
 use rustc_middle::middle::resolve_bound_vars::*;
-use rustc_middle::ty::{self, DefIdTree, TyCtxt, TypeSuperVisitable, TypeVisitor};
+use rustc_middle::query::Providers;
+use rustc_middle::ty::{self, TyCtxt, TypeSuperVisitable, TypeVisitor};
 use rustc_session::lint;
 use rustc_span::def_id::DefId;
 use rustc_span::symbol::{sym, Ident};
-use rustc_span::Span;
+use rustc_span::{Span, DUMMY_SP};
 use std::fmt;
 
 use crate::errors;
@@ -232,8 +233,8 @@ impl<'a> fmt::Debug for TruncatedScopeDebug<'a> {
 
 type ScopeRef<'a> = &'a Scope<'a>;
 
-pub(crate) fn provide(providers: &mut ty::query::Providers) {
-    *providers = ty::query::Providers {
+pub(crate) fn provide(providers: &mut Providers) {
+    *providers = Providers {
         resolve_bound_vars,
 
         named_variable_map: |tcx, id| tcx.resolve_bound_vars(id).defs.get(&id),
@@ -337,7 +338,17 @@ impl<'a, 'tcx> BoundVarContext<'a, 'tcx> {
 
                 Scope::TraitRefBoundary { .. } => {
                     // We should only see super trait lifetimes if there is a `Binder` above
-                    assert!(supertrait_bound_vars.is_empty());
+                    // though this may happen when we call `poly_trait_ref_binder_info` with
+                    // an (erroneous, #113423) associated return type bound in an impl header.
+                    if !supertrait_bound_vars.is_empty() {
+                        self.tcx.sess.delay_span_bug(
+                            DUMMY_SP,
+                            format!(
+                                "found supertrait lifetimes without a binder to append \
+                                them to: {supertrait_bound_vars:?}"
+                            ),
+                        );
+                    }
                     break (vec![], BinderScopeType::Normal);
                 }
 
@@ -455,13 +466,9 @@ impl<'a, 'tcx> Visitor<'tcx> for BoundVarContext<'a, 'tcx> {
                     .collect::<Vec<_>>();
 
                 if !infer_spans.is_empty() {
-                    self.tcx.sess
-                        .struct_span_err(
-                            infer_spans,
-                            "implicit types in closure signatures are forbidden when `for<...>` is present",
-                        )
-                        .span_label(for_sp, "`for<...>` is here")
-                        .emit();
+                    self.tcx
+                        .sess
+                        .emit_err(errors::ClosureImplicitHrtb { spans: infer_spans, for_sp });
                 }
             }
 
@@ -530,7 +537,8 @@ impl<'a, 'tcx> Visitor<'tcx> for BoundVarContext<'a, 'tcx> {
                 });
             }
             hir::ItemKind::OpaqueTy(hir::OpaqueTy {
-                origin: hir::OpaqueTyOrigin::TyAlias, ..
+                origin: hir::OpaqueTyOrigin::TyAlias { .. },
+                ..
             }) => {
                 // Opaque types are visited when we visit the
                 // `TyKind::OpaqueDef`, so that they have the lifetimes from
@@ -558,7 +566,7 @@ impl<'a, 'tcx> Visitor<'tcx> for BoundVarContext<'a, 'tcx> {
                     });
                 }
             }
-            hir::ItemKind::OpaqueTy(hir::OpaqueTy {
+            hir::ItemKind::OpaqueTy(&hir::OpaqueTy {
                 origin: hir::OpaqueTyOrigin::FnReturn(parent) | hir::OpaqueTyOrigin::AsyncFn(parent),
                 generics,
                 ..
@@ -711,7 +719,7 @@ impl<'a, 'tcx> Visitor<'tcx> for BoundVarContext<'a, 'tcx> {
                 let opaque_ty = self.tcx.hir().item(item_id);
                 match &opaque_ty.kind {
                     hir::ItemKind::OpaqueTy(hir::OpaqueTy {
-                        origin: hir::OpaqueTyOrigin::TyAlias,
+                        origin: hir::OpaqueTyOrigin::TyAlias { .. },
                         ..
                     }) => {
                         intravisit::walk_ty(self, ty);
@@ -991,7 +999,7 @@ impl<'a, 'tcx> Visitor<'tcx> for BoundVarContext<'a, 'tcx> {
                                         lifetime.ident
                                     ),
                                     |lint| {
-                                        let help = &format!(
+                                        let help = format!(
                                             "you can use the `'static` lifetime directly, in place of `{}`",
                                             lifetime.ident,
                                         );
@@ -1051,9 +1059,8 @@ impl<'a, 'tcx> Visitor<'tcx> for BoundVarContext<'a, 'tcx> {
     }
 }
 
-fn object_lifetime_default(tcx: TyCtxt<'_>, param_def_id: DefId) -> ObjectLifetimeDefault {
+fn object_lifetime_default(tcx: TyCtxt<'_>, param_def_id: LocalDefId) -> ObjectLifetimeDefault {
     debug_assert_eq!(tcx.def_kind(param_def_id), DefKind::TyParam);
-    let param_def_id = param_def_id.expect_local();
     let hir::Node::GenericParam(param) = tcx.hir().get_by_def_id(param_def_id) else {
         bug!("expected GenericParam for object_lifetime_default");
     };
@@ -1334,7 +1341,7 @@ impl<'a, 'tcx> BoundVarContext<'a, 'tcx> {
 
         // We may fail to resolve higher-ranked lifetimes that are mentioned by APIT.
         // AST-based resolution does not care for impl-trait desugaring, which are the
-        // responibility of lowering. This may create a mismatch between the resolution
+        // responsibility of lowering. This may create a mismatch between the resolution
         // AST found (`region_def_id`) which points to HRTB, and what HIR allows.
         // ```
         // fn foo(x: impl for<'a> Trait<'a, Assoc = impl Copy + 'a>) {}
@@ -1347,12 +1354,10 @@ impl<'a, 'tcx> BoundVarContext<'a, 'tcx> {
                 Scope::Binder {
                     where_bound_origin: Some(hir::PredicateOrigin::ImplTrait), ..
                 } => {
-                    let mut err = self.tcx.sess.struct_span_err(
-                        lifetime_ref.ident.span,
-                        "`impl Trait` can only mention lifetimes bound at the fn or impl level",
-                    );
-                    err.span_note(self.tcx.def_span(region_def_id), "lifetime declared here");
-                    err.emit();
+                    self.tcx.sess.emit_err(errors::LateBoundInApit::Lifetime {
+                        span: lifetime_ref.ident.span,
+                        param_span: self.tcx.def_span(region_def_id),
+                    });
                     return;
                 }
                 Scope::Root { .. } => break,
@@ -1370,7 +1375,7 @@ impl<'a, 'tcx> BoundVarContext<'a, 'tcx> {
 
         self.tcx.sess.delay_span_bug(
             lifetime_ref.ident.span,
-            &format!("Could not resolve {:?} in scope {:#?}", lifetime_ref, self.scope,),
+            format!("Could not resolve {:?} in scope {:#?}", lifetime_ref, self.scope,),
         );
     }
 
@@ -1382,6 +1387,7 @@ impl<'a, 'tcx> BoundVarContext<'a, 'tcx> {
         let mut late_depth = 0;
         let mut scope = self.scope;
         let mut crossed_anon_const = false;
+
         let result = loop {
             match *scope {
                 Scope::Body { s, .. } => {
@@ -1427,26 +1433,70 @@ impl<'a, 'tcx> BoundVarContext<'a, 'tcx> {
             if let ResolvedArg::LateBound(..) = def && crossed_anon_const {
                 let use_span = self.tcx.hir().span(hir_id);
                 let def_span = self.tcx.def_span(param_def_id);
-                match self.tcx.def_kind(param_def_id) {
+                let guar = match self.tcx.def_kind(param_def_id) {
                     DefKind::ConstParam => {
                         self.tcx.sess.emit_err(errors::CannotCaptureLateBoundInAnonConst::Const {
                             use_span,
                             def_span,
-                        });
+                        })
                     }
                     DefKind::TyParam => {
                         self.tcx.sess.emit_err(errors::CannotCaptureLateBoundInAnonConst::Type {
                             use_span,
                             def_span,
-                        });
+                        })
                     }
                     _ => unreachable!(),
-                }
-                return;
+                };
+                self.map.defs.insert(hir_id, ResolvedArg::Error(guar));
+            } else {
+                self.map.defs.insert(hir_id, def);
             }
-
-            self.map.defs.insert(hir_id, def);
             return;
+        }
+
+        // We may fail to resolve higher-ranked ty/const vars that are mentioned by APIT.
+        // AST-based resolution does not care for impl-trait desugaring, which are the
+        // responsibility of lowering. This may create a mismatch between the resolution
+        // AST found (`param_def_id`) which points to HRTB, and what HIR allows.
+        // ```
+        // fn foo(x: impl for<T> Trait<Assoc = impl Trait2<T>>) {}
+        // ```
+        //
+        // In such case, walk back the binders to diagnose it properly.
+        let mut scope = self.scope;
+        loop {
+            match *scope {
+                Scope::Binder {
+                    where_bound_origin: Some(hir::PredicateOrigin::ImplTrait), ..
+                } => {
+                    let guar = self.tcx.sess.emit_err(match self.tcx.def_kind(param_def_id) {
+                        DefKind::TyParam => errors::LateBoundInApit::Type {
+                            span: self.tcx.hir().span(hir_id),
+                            param_span: self.tcx.def_span(param_def_id),
+                        },
+                        DefKind::ConstParam => errors::LateBoundInApit::Const {
+                            span: self.tcx.hir().span(hir_id),
+                            param_span: self.tcx.def_span(param_def_id),
+                        },
+                        kind => {
+                            bug!("unexpected def-kind: {}", kind.descr(param_def_id.to_def_id()))
+                        }
+                    });
+                    self.map.defs.insert(hir_id, ResolvedArg::Error(guar));
+                    return;
+                }
+                Scope::Root { .. } => break,
+                Scope::Binder { s, .. }
+                | Scope::Body { s, .. }
+                | Scope::Elision { s, .. }
+                | Scope::ObjectLifetimeDefault { s, .. }
+                | Scope::Supertrait { s, .. }
+                | Scope::TraitRefBoundary { s, .. }
+                | Scope::AnonConstBoundary { s } => {
+                    scope = s;
+                }
+            }
         }
 
         self.tcx.sess.delay_span_bug(
@@ -1462,7 +1512,7 @@ impl<'a, 'tcx> BoundVarContext<'a, 'tcx> {
         depth: usize,
         generic_args: &'tcx hir::GenericArgs<'tcx>,
     ) {
-        if generic_args.parenthesized {
+        if generic_args.parenthesized == hir::GenericArgsParentheses::ParenSugar {
             self.visit_fn_like_elision(
                 generic_args.inputs(),
                 Some(generic_args.bindings[0].ty()),
@@ -1641,9 +1691,67 @@ impl<'a, 'tcx> BoundVarContext<'a, 'tcx> {
                 },
                 s: self.scope,
             };
-            if let Some(type_def_id) = type_def_id {
-                let bound_vars =
-                    BoundVarContext::supertrait_hrtb_vars(self.tcx, type_def_id, binding.ident);
+            // If the binding is parenthesized, then this must be `feature(return_type_notation)`.
+            // In that case, introduce a binder over all of the function's early and late bound vars.
+            //
+            // For example, given
+            // ```
+            // trait Foo {
+            //     async fn x<'r, T>();
+            // }
+            // ```
+            // and a bound that looks like:
+            //    `for<'a> T::Trait<'a, x(): for<'b> Other<'b>>`
+            // this is going to expand to something like:
+            //    `for<'a> for<'r, T> <T as Trait<'a>>::x::<'r, T>::{opaque#0}: for<'b> Other<'b>`.
+            if binding.gen_args.parenthesized == hir::GenericArgsParentheses::ReturnTypeNotation {
+                let bound_vars = if let Some(type_def_id) = type_def_id
+                    && self.tcx.def_kind(type_def_id) == DefKind::Trait
+                    && let Some((mut bound_vars, assoc_fn)) =
+                        BoundVarContext::supertrait_hrtb_vars(
+                            self.tcx,
+                            type_def_id,
+                            binding.ident,
+                            ty::AssocKind::Fn,
+                        )
+                {
+                    bound_vars.extend(self.tcx.generics_of(assoc_fn.def_id).params.iter().map(
+                        |param| match param.kind {
+                            ty::GenericParamDefKind::Lifetime => ty::BoundVariableKind::Region(
+                                ty::BoundRegionKind::BrNamed(param.def_id, param.name),
+                            ),
+                            ty::GenericParamDefKind::Type { .. } => ty::BoundVariableKind::Ty(
+                                ty::BoundTyKind::Param(param.def_id, param.name),
+                            ),
+                            ty::GenericParamDefKind::Const { .. } => ty::BoundVariableKind::Const,
+                        },
+                    ));
+                    bound_vars
+                        .extend(self.tcx.fn_sig(assoc_fn.def_id).subst_identity().bound_vars());
+                    bound_vars
+                } else {
+                    self.tcx.sess.delay_span_bug(
+                        binding.ident.span,
+                        "bad return type notation here",
+                    );
+                    vec![]
+                };
+                self.with(scope, |this| {
+                    let scope = Scope::Supertrait { bound_vars, s: this.scope };
+                    this.with(scope, |this| {
+                        let (bound_vars, _) = this.poly_trait_ref_binder_info();
+                        this.record_late_bound_vars(binding.hir_id, bound_vars);
+                        this.visit_assoc_type_binding(binding)
+                    });
+                });
+            } else if let Some(type_def_id) = type_def_id {
+                let bound_vars = BoundVarContext::supertrait_hrtb_vars(
+                    self.tcx,
+                    type_def_id,
+                    binding.ident,
+                    ty::AssocKind::Type,
+                )
+                .map(|(bound_vars, _)| bound_vars);
                 self.with(scope, |this| {
                     let scope = Scope::Supertrait {
                         bound_vars: bound_vars.unwrap_or_default(),
@@ -1673,11 +1781,15 @@ impl<'a, 'tcx> BoundVarContext<'a, 'tcx> {
         tcx: TyCtxt<'tcx>,
         def_id: DefId,
         assoc_name: Ident,
-    ) -> Option<Vec<ty::BoundVariableKind>> {
-        let trait_defines_associated_type_named = |trait_def_id: DefId| {
-            tcx.associated_items(trait_def_id)
-                .find_by_name_and_kind(tcx, assoc_name, ty::AssocKind::Type, trait_def_id)
-                .is_some()
+        assoc_kind: ty::AssocKind,
+    ) -> Option<(Vec<ty::BoundVariableKind>, &'tcx ty::AssocItem)> {
+        let trait_defines_associated_item_named = |trait_def_id: DefId| {
+            tcx.associated_items(trait_def_id).find_by_name_and_kind(
+                tcx,
+                assoc_name,
+                assoc_kind,
+                trait_def_id,
+            )
         };
 
         use smallvec::{smallvec, SmallVec};
@@ -1695,15 +1807,14 @@ impl<'a, 'tcx> BoundVarContext<'a, 'tcx> {
                 _ => break None,
             }
 
-            if trait_defines_associated_type_named(def_id) {
-                break Some(bound_vars.into_iter().collect());
+            if let Some(assoc_item) = trait_defines_associated_item_named(def_id) {
+                break Some((bound_vars.into_iter().collect(), assoc_item));
             }
-            let predicates =
-                tcx.super_predicates_that_define_assoc_type((def_id, Some(assoc_name)));
+            let predicates = tcx.super_predicates_that_define_assoc_item((def_id, assoc_name));
             let obligations = predicates.predicates.iter().filter_map(|&(pred, _)| {
                 let bound_predicate = pred.kind();
                 match bound_predicate.skip_binder() {
-                    ty::PredicateKind::Clause(ty::Clause::Trait(data)) => {
+                    ty::ClauseKind::Trait(data) => {
                         // The order here needs to match what we would get from `subst_supertrait`
                         let pred_bound_vars = bound_predicate.bound_vars();
                         let mut all_bound_vars = bound_vars.clone();
@@ -1867,7 +1978,7 @@ fn is_late_bound_map(
     /// handles cycle detection as we go through the query system.
     ///
     /// This is necessary in the first place for the following case:
-    /// ```
+    /// ```rust,ignore (pseudo-Rust)
     /// type Alias<'a, T> = <T as Trait<'a>>::Assoc;
     /// fn foo<'a>(_: Alias<'a, ()>) -> Alias<'a, ()> { ... }
     /// ```
@@ -1892,7 +2003,7 @@ fn is_late_bound_map(
                 ty::Param(param_ty) => {
                     self.arg_is_constrained[param_ty.index as usize] = true;
                 }
-                ty::Alias(ty::Projection, _) => return ControlFlow::Continue(()),
+                ty::Alias(ty::Projection | ty::Inherent, _) => return ControlFlow::Continue(()),
                 _ => (),
             }
             t.super_visit_with(self)

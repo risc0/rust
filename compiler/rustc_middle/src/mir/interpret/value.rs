@@ -97,6 +97,10 @@ impl<'tcx> ConstValue<'tcx> {
         ConstValue::Scalar(Scalar::from_u64(i))
     }
 
+    pub fn from_u128(i: u128) -> Self {
+        ConstValue::Scalar(Scalar::from_u128(i))
+    }
+
     pub fn from_target_usize(i: u64, cx: &impl HasDataLayout) -> Self {
         ConstValue::Scalar(Scalar::from_target_usize(i, cx))
     }
@@ -241,6 +245,11 @@ impl<Prov> Scalar<Prov> {
     }
 
     #[inline]
+    pub fn from_u128(i: u128) -> Self {
+        Scalar::Int(i.into())
+    }
+
+    #[inline]
     pub fn from_target_usize(i: u64, cx: &impl HasDataLayout) -> Self {
         Self::from_uint(i, cx.data_layout().pointer_size)
     }
@@ -375,7 +384,8 @@ impl<'tcx, Prov: Provenance> Scalar<Prov> {
     #[inline(always)]
     #[cfg_attr(debug_assertions, track_caller)] // only in debug builds due to perf (see #98980)
     pub fn assert_bits(self, target_size: Size) -> u128 {
-        self.to_bits(target_size).unwrap()
+        self.to_bits(target_size)
+            .unwrap_or_else(|_| panic!("assertion failed: {self:?} fits {target_size:?}"))
     }
 
     pub fn to_bool(self) -> InterpResult<'tcx, bool> {

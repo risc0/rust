@@ -1,9 +1,8 @@
 use super::IsMethodCall;
 use crate::astconv::{
-    CreateSubstsForGenericArgsCtxt, ExplicitLateBound, GenericArgCountMismatch,
-    GenericArgCountResult, GenericArgPosition,
+    errors::prohibit_assoc_ty_binding, CreateSubstsForGenericArgsCtxt, ExplicitLateBound,
+    GenericArgCountMismatch, GenericArgCountResult, GenericArgPosition,
 };
-use crate::errors::AssocTypeBindingNotAllowed;
 use crate::structured_errors::{GenericArgsInfo, StructuredDiagnostic, WrongNumberOfGenericArgs};
 use rustc_ast::ast::ParamKindOrd;
 use rustc_errors::{struct_span_err, Applicability, Diagnostic, ErrorGuaranteed, MultiSpan};
@@ -25,7 +24,7 @@ fn generic_arg_mismatch_err(
     arg: &GenericArg<'_>,
     param: &GenericParamDef,
     possible_ordering_error: bool,
-    help: Option<&str>,
+    help: Option<String>,
 ) -> ErrorGuaranteed {
     let sess = tcx.sess;
     let mut err = struct_span_err!(
@@ -113,7 +112,7 @@ fn generic_arg_mismatch_err(
             if let rustc_hir::ExprKind::Path(rustc_hir::QPath::Resolved(_, path)) = body.value.kind
             {
                 if let Res::Def(DefKind::Fn { .. }, id) = path.res {
-                    err.help(&format!("`{}` is a function item, not a type", tcx.item_name(id)));
+                    err.help(format!("`{}` is a function item, not a type", tcx.item_name(id)));
                     err.help("function item types cannot be named directly");
                 }
             }
@@ -131,7 +130,7 @@ fn generic_arg_mismatch_err(
         } else {
             (arg.descr(), param.kind.descr())
         };
-        err.note(&format!("{} arguments must be provided before {} arguments", first, last));
+        err.note(format!("{} arguments must be provided before {} arguments", first, last));
         if let Some(help) = help {
             err.help(help);
         }
@@ -301,7 +300,7 @@ pub fn create_substs_for_generic_args<'tcx, 'a>(
                                     arg,
                                     param,
                                     !args_iter.clone().is_sorted_by_key(|arg| arg.to_ord()),
-                                    Some(&format!(
+                                    Some(format!(
                                         "reorder the arguments: {}: `<{}>`",
                                         param_types_present
                                             .into_iter()
@@ -433,7 +432,7 @@ pub(crate) fn check_generic_arg_count(
         (gen_pos != GenericArgPosition::Type || infer_args) && !gen_args.has_lifetime_params();
 
     if gen_pos != GenericArgPosition::Type && let Some(b) = gen_args.bindings.first() {
-            prohibit_assoc_ty_binding(tcx, b.span);
+             prohibit_assoc_ty_binding(tcx, b.span, None);
         }
 
     let explicit_late_bound =
@@ -589,11 +588,6 @@ pub(crate) fn check_generic_arg_count(
     }
 }
 
-/// Emits an error regarding forbidden type binding associations
-pub fn prohibit_assoc_ty_binding(tcx: TyCtxt<'_>, span: Span) {
-    tcx.sess.emit_err(AssocTypeBindingNotAllowed { span });
-}
-
 /// Prohibits explicit lifetime arguments if late-bound lifetime parameters
 /// are present. This is used both for datatypes and function calls.
 pub(crate) fn prohibit_explicit_late_bound_lifetimes(
@@ -618,7 +612,7 @@ pub(crate) fn prohibit_explicit_late_bound_lifetimes(
         if position == GenericArgPosition::Value
             && args.num_lifetime_params() != param_counts.lifetimes
         {
-            let mut err = tcx.sess.struct_span_err(span, msg);
+            let mut err = struct_span_err!(tcx.sess, span, E0794, "{}", msg);
             err.span_note(span_late, note);
             err.emit();
         } else {

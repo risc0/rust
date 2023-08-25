@@ -106,7 +106,7 @@ impl<Prov: Provenance> std::fmt::Display for ImmTy<'_, Prov> {
                     // Just print the ptr value. `pretty_print_const_scalar_ptr` would also try to
                     // print what is points to, which would fail since it has no access to the local
                     // memory.
-                    cx.pretty_print_const_pointer(ptr, ty, true)
+                    cx.pretty_print_const_pointer(ptr, ty)
                 }
             }
         }
@@ -245,6 +245,12 @@ impl<'tcx, Prov: Provenance> ImmTy<'tcx, Prov> {
 impl<'tcx, Prov: Provenance> OpTy<'tcx, Prov> {
     pub fn len(&self, cx: &impl HasDataLayout) -> InterpResult<'tcx, u64> {
         if self.layout.is_unsized() {
+            if matches!(self.op, Operand::Immediate(Immediate::Uninit)) {
+                // Uninit unsized places shouldn't occur. In the interpreter we have them
+                // temporarily for unsized arguments before their value is put in; in ConstProp they
+                // remain uninit and this code can actually be reached.
+                throw_inval!(UninitUnsizedLocal);
+            }
             // There are no unsized immediates.
             self.assert_mem_place().len(cx)
         } else {
@@ -589,7 +595,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
             // FIXME(generic_const_exprs): `ConstKind::Expr` should be able to be evaluated
             ty::ConstKind::Expr(_) => throw_inval!(TooGeneric),
             ty::ConstKind::Error(reported) => {
-                throw_inval!(AlreadyReported(reported))
+                throw_inval!(AlreadyReported(reported.into()))
             }
             ty::ConstKind::Unevaluated(uv) => {
                 let instance = self.resolve(uv.def, uv.substs)?;
@@ -627,7 +633,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         }
     }
 
-    pub(super) fn const_val_to_op(
+    pub(crate) fn const_val_to_op(
         &self,
         val_val: ConstValue<'tcx>,
         ty: Ty<'tcx>,

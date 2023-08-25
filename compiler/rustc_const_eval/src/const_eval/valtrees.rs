@@ -1,6 +1,7 @@
 use super::eval_queries::{mk_eval_cx, op_to_const};
 use super::machine::CompileTimeEvalContext;
 use super::{ValTreeCreationError, ValTreeCreationResult, VALTREE_MAX_NODES};
+use crate::const_eval::CanAccessStatics;
 use crate::interpret::{
     intern_const_alloc_recursive, ConstValue, ImmTy, Immediate, InternKind, MemPlaceMeta,
     MemoryKind, PlaceTy, Scalar,
@@ -8,7 +9,7 @@ use crate::interpret::{
 use crate::interpret::{MPlaceTy, Value};
 use rustc_middle::ty::{self, ScalarInt, Ty, TyCtxt};
 use rustc_span::source_map::DUMMY_SP;
-use rustc_target::abi::{Align, VariantIdx};
+use rustc_target::abi::{Align, FieldIdx, VariantIdx, FIRST_VARIANT};
 
 #[instrument(skip(ecx), level = "debug")]
 fn branches<'tcx>(
@@ -263,7 +264,11 @@ pub fn valtree_to_const_value<'tcx>(
     // FIXME Does this need an example?
 
     let (param_env, ty) = param_env_ty.into_parts();
-    let mut ecx = mk_eval_cx(tcx, DUMMY_SP, param_env, false);
+    let mut ecx: crate::interpret::InterpCx<
+        '_,
+        '_,
+        crate::const_eval::CompileTimeInterpreter<'_, '_>,
+    > = mk_eval_cx(tcx, DUMMY_SP, param_env, CanAccessStatics::No);
 
     match ty.kind() {
         ty::FnDef(..) => {
@@ -337,7 +342,7 @@ fn valtree_into_mplace<'tcx>(
 
     match ty.kind() {
         ty::FnDef(_, _) => {
-            ecx.write_immediate(Immediate::Uninit, &place.into()).unwrap();
+            // Zero-sized type, nothing to do.
         }
         ty::Bool | ty::Int(_) | ty::Uint(_) | ty::Float(_) | ty::Char => {
             let scalar_int = valtree.unwrap_leaf();
@@ -412,7 +417,8 @@ fn valtree_into_mplace<'tcx>(
 
                         let inner_ty = match ty.kind() {
                             ty::Adt(def, substs) => {
-                                def.variant(VariantIdx::from_u32(0)).fields[i].ty(tcx, substs)
+                                let i = FieldIdx::from_usize(i);
+                                def.variant(FIRST_VARIANT).fields[i].ty(tcx, substs)
                             }
                             ty::Tuple(inner_tys) => inner_tys[i],
                             _ => bug!("unexpected unsized type {:?}", ty),

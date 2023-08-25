@@ -49,8 +49,7 @@ use rustc_span::{BytePos, Pos, Span, Symbol};
 use rustc_trait_selection::infer::InferCtxtExt;
 
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
-use rustc_index::vec::Idx;
-use rustc_target::abi::VariantIdx;
+use rustc_target::abi::FIRST_VARIANT;
 
 use std::iter;
 
@@ -224,7 +223,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let closure_hir_id = self.tcx.hir().local_def_id_to_hir_id(closure_def_id);
 
         if should_do_rust_2021_incompatible_closure_captures_analysis(self.tcx, closure_hir_id) {
-            self.perform_2229_migration_anaysis(closure_def_id, body_id, capture_clause, span);
+            self.perform_2229_migration_analysis(closure_def_id, body_id, capture_clause, span);
         }
 
         let after_feature_tys = self.final_upvar_tys(closure_def_id);
@@ -301,7 +300,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         // Build a tuple (U0..Un) of the final upvar types U0..Un
         // and unify the upvar tuple type in the closure with it:
-        let final_tupled_upvars_type = self.tcx.mk_tup(&final_upvar_tys);
+        let final_tupled_upvars_type = Ty::new_tup(self.tcx, &final_upvar_tys);
         self.demand_suptype(span, substs.tupled_upvars_ty(), final_tupled_upvars_type);
 
         let fake_reads = delegate
@@ -315,8 +314,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             self.typeck_results.borrow_mut().closure_size_eval.insert(
                 closure_def_id,
                 ClosureSizeProfileData {
-                    before_feature_tys: self.tcx.mk_tup(&before_feature_tys),
-                    after_feature_tys: self.tcx.mk_tup(&after_feature_tys),
+                    before_feature_tys: Ty::new_tup(self.tcx, &before_feature_tys),
+                    after_feature_tys: Ty::new_tup(self.tcx, &after_feature_tys),
                 },
             );
         }
@@ -424,7 +423,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 // closures. We want to make sure any adjustment that might make us move the place into
                 // the closure gets handled.
                 let (place, capture_kind) =
-                    restrict_precision_for_drop_types(self, place, capture_kind, usage_span);
+                    restrict_precision_for_drop_types(self, place, capture_kind);
 
                 capture_info.capture_kind = capture_kind;
                 (place, capture_info)
@@ -712,10 +711,14 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     }
                 }
 
-                unreachable!(
-                    "we captured two identical projections: capture1 = {:?}, capture2 = {:?}",
-                    capture1, capture2
+                self.tcx.sess.delay_span_bug(
+                    closure_span,
+                    format!(
+                        "two identical projections: ({:?}, {:?})",
+                        capture1.place.projections, capture2.place.projections
+                    ),
                 );
+                std::cmp::Ordering::Equal
             });
         }
 
@@ -728,7 +731,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
     /// Perform the migration analysis for RFC 2229, and emit lint
     /// `disjoint_capture_drop_reorder` if needed.
-    fn perform_2229_migration_anaysis(
+    fn perform_2229_migration_analysis(
         &self,
         closure_def_id: LocalDefId,
         body_id: hir::BodyId,
@@ -860,7 +863,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             let indent = line2.split_once(|c: char| !c.is_whitespace()).unwrap_or_default().0;
                             lint.span_suggestion(
                                 closure_body_span.with_lo(closure_body_span.lo() + BytePos::from_usize(line1.len())).shrink_to_lo(),
-                                &diagnostic_msg,
+                                diagnostic_msg,
                                 format!("\n{indent}{migration_string};"),
                                 Applicability::MachineApplicable,
                             );
@@ -871,7 +874,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             // directly after the `{`.
                             lint.span_suggestion(
                                 closure_body_span.with_lo(closure_body_span.lo() + BytePos(1)).shrink_to_lo(),
-                                &diagnostic_msg,
+                                diagnostic_msg,
                                 format!(" {migration_string};"),
                                 Applicability::MachineApplicable,
                             );
@@ -879,7 +882,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             // This is a closure without braces around the body.
                             // We add braces to add the `let` before the body.
                             lint.multipart_suggestion(
-                                &diagnostic_msg,
+                                diagnostic_msg,
                                 vec![
                                     (closure_body_span.shrink_to_lo(), format!("{{ {migration_string}; ")),
                                     (closure_body_span.shrink_to_hi(), " }".to_string()),
@@ -890,7 +893,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     } else {
                         lint.span_suggestion(
                             closure_span,
-                            &diagnostic_msg,
+                            diagnostic_msg,
                             migration_string,
                             Applicability::HasPlaceholders
                         );
@@ -969,15 +972,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let mut obligations_should_hold = Vec::new();
         // Checks if a root variable implements any of the auto traits
         for check_trait in auto_traits_def_id.iter() {
-            obligations_should_hold.push(
-                check_trait
-                    .map(|check_trait| {
-                        self.infcx
-                            .type_implements_trait(check_trait, [ty], self.param_env)
-                            .must_apply_modulo_regions()
-                    })
-                    .unwrap_or(false),
-            );
+            obligations_should_hold.push(check_trait.is_some_and(|check_trait| {
+                self.infcx
+                    .type_implements_trait(check_trait, [ty], self.param_env)
+                    .must_apply_modulo_regions()
+            }));
         }
 
         let mut problematic_captures = FxHashMap::default();
@@ -993,15 +992,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // Checks if a capture implements any of the auto traits
             let mut obligations_holds_for_capture = Vec::new();
             for check_trait in auto_traits_def_id.iter() {
-                obligations_holds_for_capture.push(
-                    check_trait
-                        .map(|check_trait| {
-                            self.infcx
-                                .type_implements_trait(check_trait, [ty], self.param_env)
-                                .must_apply_modulo_regions()
-                        })
-                        .unwrap_or(false),
-                );
+                obligations_holds_for_capture.push(check_trait.is_some_and(|check_trait| {
+                    self.infcx
+                        .type_implements_trait(check_trait, [ty], self.param_env)
+                        .must_apply_modulo_regions()
+                }));
             }
 
             let mut capture_problems = FxHashSet::default();
@@ -1402,7 +1397,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         ProjectionKind::Field(..)
                     ))
                 );
-                def.variants().get(VariantIdx::new(0)).unwrap().fields.iter().enumerate().any(
+                def.variants().get(FIRST_VARIANT).unwrap().fields.iter_enumerated().any(
                     |(i, field)| {
                         let paths_using_field = captured_by_move_projs
                             .iter()
@@ -1410,7 +1405,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                 if let ProjectionKind::Field(field_idx, _) =
                                     projs.first().unwrap().kind
                                 {
-                                    if (field_idx as usize) == i { Some(&projs[1..]) } else { None }
+                                    if field_idx == i { Some(&projs[1..]) } else { None }
                                 } else {
                                     unreachable!();
                                 }
@@ -1443,7 +1438,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         .filter_map(|projs| {
                             if let ProjectionKind::Field(field_idx, _) = projs.first().unwrap().kind
                             {
-                                if (field_idx as usize) == i { Some(&projs[1..]) } else { None }
+                                if field_idx.index() == i { Some(&projs[1..]) } else { None }
                             } else {
                                 unreachable!();
                             }
@@ -1498,7 +1493,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     }
 
     fn should_log_capture_analysis(&self, closure_def_id: LocalDefId) -> bool {
-        self.tcx.has_attr(closure_def_id.to_def_id(), sym::rustc_capture_analysis)
+        self.tcx.has_attr(closure_def_id, sym::rustc_capture_analysis)
     }
 
     fn log_capture_analysis_first_pass(
@@ -1516,7 +1511,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
                 let span =
                     capture_info.path_expr_id.map_or(closure_span, |e| self.tcx.hir().span(e));
-                diag.span_note(span, &output_str);
+                diag.span_note(span, output_str);
             }
             diag.emit();
         }
@@ -1557,13 +1552,13 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             multi_span.push_span_label(path_span, path_label);
                             multi_span.push_span_label(capture_kind_span, capture_kind_label);
 
-                            diag.span_note(multi_span, &output_str);
+                            diag.span_note(multi_span, output_str);
                         } else {
                             let span = capture_info
                                 .path_expr_id
                                 .map_or(closure_span, |e| self.tcx.hir().span(e));
 
-                            diag.span_note(span, &output_str);
+                            diag.span_note(span, output_str);
                         };
                     }
                 }
@@ -1670,9 +1665,11 @@ fn apply_capture_kind_on_capture_ty<'tcx>(
 ) -> Ty<'tcx> {
     match capture_kind {
         ty::UpvarCapture::ByValue => ty,
-        ty::UpvarCapture::ByRef(kind) => {
-            tcx.mk_ref(region.unwrap(), ty::TypeAndMut { ty: ty, mutbl: kind.to_mutbl_lossy() })
-        }
+        ty::UpvarCapture::ByRef(kind) => Ty::new_ref(
+            tcx,
+            region.unwrap(),
+            ty::TypeAndMut { ty: ty, mutbl: kind.to_mutbl_lossy() },
+        ),
     }
 }
 
@@ -1822,9 +1819,8 @@ fn restrict_precision_for_drop_types<'a, 'tcx>(
     fcx: &'a FnCtxt<'a, 'tcx>,
     mut place: Place<'tcx>,
     mut curr_mode: ty::UpvarCapture,
-    span: Span,
 ) -> (Place<'tcx>, ty::UpvarCapture) {
-    let is_copy_type = fcx.infcx.type_is_copy_modulo_regions(fcx.param_env, place.ty(), span);
+    let is_copy_type = fcx.infcx.type_is_copy_modulo_regions(fcx.param_env, place.ty());
 
     if let (false, UpvarCapture::ByValue) = (is_copy_type, curr_mode) {
         for i in 0..place.projections.len() {
@@ -1891,14 +1887,13 @@ fn restrict_capture_precision(
 
     for (i, proj) in place.projections.iter().enumerate() {
         match proj.kind {
-            ProjectionKind::Index => {
-                // Arrays are completely captured, so we drop Index projections
+            ProjectionKind::Index | ProjectionKind::Subslice => {
+                // Arrays are completely captured, so we drop Index and Subslice projections
                 truncate_place_to_len_and_update_capture_kind(&mut place, &mut curr_mode, i);
                 return (place, curr_mode);
             }
             ProjectionKind::Deref => {}
             ProjectionKind::Field(..) => {} // ignore
-            ProjectionKind::Subslice => {}  // We never capture this
         }
     }
 

@@ -59,18 +59,15 @@ This API is completely unstable and subject to change.
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![feature(box_patterns)]
 #![feature(control_flow_enum)]
-#![feature(drain_filter)]
-#![feature(hash_drain_filter)]
 #![feature(if_let_guard)]
 #![feature(is_sorted)]
 #![feature(iter_intersperse)]
 #![feature(let_chains)]
 #![feature(min_specialization)]
 #![feature(never_type)]
-#![feature(once_cell)]
+#![feature(lazy_cell)]
 #![feature(slice_partition_dedup)]
 #![feature(try_blocks)]
-#![feature(is_some_and)]
 #![feature(type_alias_impl_trait)]
 #![recursion_limit = "256"]
 
@@ -100,12 +97,12 @@ mod variance;
 
 use rustc_errors::ErrorGuaranteed;
 use rustc_errors::{DiagnosticMessage, SubdiagnosticMessage};
+use rustc_fluent_macro::fluent_messages;
 use rustc_hir as hir;
 use rustc_hir::Node;
-use rustc_infer::infer::{InferOk, TyCtxtInferExt};
-use rustc_macros::fluent_messages;
+use rustc_infer::infer::TyCtxtInferExt;
 use rustc_middle::middle;
-use rustc_middle::ty::query::Providers;
+use rustc_middle::query::Providers;
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_middle::util;
 use rustc_session::{config::EntryFnType, parse::feature_err};
@@ -113,14 +110,14 @@ use rustc_span::def_id::{DefId, LocalDefId, CRATE_DEF_ID};
 use rustc_span::{symbol::sym, Span, DUMMY_SP};
 use rustc_target::spec::abi::Abi;
 use rustc_trait_selection::traits::error_reporting::TypeErrCtxtExt as _;
-use rustc_trait_selection::traits::{self, ObligationCause, ObligationCauseCode};
+use rustc_trait_selection::traits::{self, ObligationCause, ObligationCauseCode, ObligationCtxt};
 
 use std::ops::Not;
 
-use astconv::AstConv;
+use astconv::{AstConv, OnlySelfBounds};
 use bounds::Bounds;
 
-fluent_messages! { "../locales/en-US.ftl" }
+fluent_messages! { "../messages.ftl" }
 
 fn require_c_abi_if_c_variadic(tcx: TyCtxt<'_>, decl: &hir::FnDecl<'_>, abi: Abi, span: Span) {
     const CONVENTIONS_UNSTABLE: &str = "`C`, `cdecl`, `win64`, `sysv64` or `efiapi`";
@@ -160,24 +157,21 @@ fn require_c_abi_if_c_variadic(tcx: TyCtxt<'_>, decl: &hir::FnDecl<'_>, abi: Abi
 fn require_same_types<'tcx>(
     tcx: TyCtxt<'tcx>,
     cause: &ObligationCause<'tcx>,
+    param_env: ty::ParamEnv<'tcx>,
     expected: Ty<'tcx>,
     actual: Ty<'tcx>,
-) -> bool {
+) {
     let infcx = &tcx.infer_ctxt().build();
-    let param_env = ty::ParamEnv::empty();
-    let errors = match infcx.at(cause, param_env).eq(expected, actual) {
-        Ok(InferOk { obligations, .. }) => traits::fully_solve_obligations(infcx, obligations),
+    let ocx = ObligationCtxt::new(infcx);
+    match ocx.eq(cause, param_env, expected, actual) {
+        Ok(()) => {
+            let errors = ocx.select_all_or_error();
+            if !errors.is_empty() {
+                infcx.err_ctxt().report_fulfillment_errors(&errors);
+            }
+        }
         Err(err) => {
             infcx.err_ctxt().report_mismatched_types(cause, expected, actual, err).emit();
-            return false;
-        }
-    };
-
-    match &errors[..] {
-        [] => true,
-        errors => {
-            infcx.err_ctxt().report_fulfillment_errors(errors, None);
-            false
         }
     }
 }
@@ -283,10 +277,21 @@ fn check_main_fn_ty(tcx: TyCtxt<'_>, main_def_id: DefId) {
         error = true;
     }
 
+    if !tcx.codegen_fn_attrs(main_def_id).target_features.is_empty()
+        // Calling functions with `#[target_feature]` is not unsafe on WASM, see #84988
+        && !tcx.sess.target.is_like_wasm
+        && !tcx.sess.opts.actually_rustdoc
+    {
+        tcx.sess.emit_err(errors::TargetFeatureOnMain { main: main_span });
+        error = true;
+    }
+
     if error {
         return;
     }
 
+    // Main should have no WC, so empty param env is OK here.
+    let param_env = ty::ParamEnv::empty();
     let expected_return_type;
     if let Some(term_did) = tcx.lang_items().termination() {
         let return_ty = main_fnsig.output();
@@ -297,8 +302,6 @@ fn check_main_fn_ty(tcx: TyCtxt<'_>, main_def_id: DefId) {
         }
         let return_ty = return_ty.skip_binder();
         let infcx = tcx.infer_ctxt().build();
-        // Main should have no WC, so empty param env is OK here.
-        let param_env = ty::ParamEnv::empty();
         let cause = traits::ObligationCause::new(
             return_ty_span,
             main_diagnostics_def_id,
@@ -309,23 +312,26 @@ fn check_main_fn_ty(tcx: TyCtxt<'_>, main_def_id: DefId) {
         ocx.register_bound(cause, param_env, norm_return_ty, term_did);
         let errors = ocx.select_all_or_error();
         if !errors.is_empty() {
-            infcx.err_ctxt().report_fulfillment_errors(&errors, None);
+            infcx.err_ctxt().report_fulfillment_errors(&errors);
             error = true;
         }
         // now we can take the return type of the given main function
         expected_return_type = main_fnsig.output();
     } else {
         // standard () main return type
-        expected_return_type = ty::Binder::dummy(tcx.mk_unit());
+        expected_return_type = ty::Binder::dummy(Ty::new_unit(tcx));
     }
 
     if error {
         return;
     }
 
-    let se_ty = tcx.mk_fn_ptr(expected_return_type.map_bound(|expected_return_type| {
-        tcx.mk_fn_sig([], expected_return_type, false, hir::Unsafety::Normal, Abi::Rust)
-    }));
+    let se_ty = Ty::new_fn_ptr(
+        tcx,
+        expected_return_type.map_bound(|expected_return_type| {
+            tcx.mk_fn_sig([], expected_return_type, false, hir::Unsafety::Normal, Abi::Rust)
+        }),
+    );
 
     require_same_types(
         tcx,
@@ -334,8 +340,9 @@ fn check_main_fn_ty(tcx: TyCtxt<'_>, main_def_id: DefId) {
             main_diagnostics_def_id,
             ObligationCauseCode::MainFunctionType,
         ),
+        param_env,
         se_ty,
-        tcx.mk_fn_ptr(main_fnsig),
+        Ty::new_fn_ptr(tcx, main_fnsig),
     );
 }
 fn check_start_fn_ty(tcx: TyCtxt<'_>, start_def_id: DefId) {
@@ -373,6 +380,18 @@ fn check_start_fn_ty(tcx: TyCtxt<'_>, start_def_id: DefId) {
                             });
                             error = true;
                         }
+                        if attr.has_name(sym::target_feature)
+                            // Calling functions with `#[target_feature]` is
+                            // not unsafe on WASM, see #84988
+                            && !tcx.sess.target.is_like_wasm
+                            && !tcx.sess.opts.actually_rustdoc
+                        {
+                            tcx.sess.emit_err(errors::StartTargetFeature {
+                                span: attr.span,
+                                start: start_span,
+                            });
+                            error = true;
+                        }
                     }
 
                     if error {
@@ -381,13 +400,16 @@ fn check_start_fn_ty(tcx: TyCtxt<'_>, start_def_id: DefId) {
                 }
             }
 
-            let se_ty = tcx.mk_fn_ptr(ty::Binder::dummy(tcx.mk_fn_sig(
-                [tcx.types.isize, tcx.mk_imm_ptr(tcx.mk_imm_ptr(tcx.types.u8))],
-                tcx.types.isize,
-                false,
-                hir::Unsafety::Normal,
-                Abi::Rust,
-            )));
+            let se_ty = Ty::new_fn_ptr(
+                tcx,
+                ty::Binder::dummy(tcx.mk_fn_sig(
+                    [tcx.types.isize, Ty::new_imm_ptr(tcx, Ty::new_imm_ptr(tcx, tcx.types.u8))],
+                    tcx.types.isize,
+                    false,
+                    hir::Unsafety::Normal,
+                    Abi::Rust,
+                )),
+            );
 
             require_same_types(
                 tcx,
@@ -396,8 +418,9 @@ fn check_start_fn_ty(tcx: TyCtxt<'_>, start_def_id: DefId) {
                     start_def_id,
                     ObligationCauseCode::StartFunctionType,
                 ),
+                ty::ParamEnv::empty(), // start should not have any where bounds.
                 se_ty,
-                tcx.mk_fn_ptr(tcx.fn_sig(start_def_id).subst_identity()),
+                Ty::new_fn_ptr(tcx, tcx.fn_sig(start_def_id).subst_identity()),
             );
         }
         _ => {
@@ -477,8 +500,6 @@ pub fn check_crate(tcx: TyCtxt<'_>) -> Result<(), ErrorGuaranteed> {
         tcx.hir().for_each_module(|module| tcx.ensure().check_mod_item_types(module))
     });
 
-    tcx.sess.time("item_bodies_checking", || tcx.typeck_item_bodies(()));
-
     check_unused::check_crate(tcx);
     check_for_entry_fn(tcx);
 
@@ -492,7 +513,7 @@ pub fn hir_ty_to_ty<'tcx>(tcx: TyCtxt<'tcx>, hir_ty: &hir::Ty<'_>) -> Ty<'tcx> {
     // def-ID that will be used to determine the traits/predicates in
     // scope. This is derived from the enclosing item-like thing.
     let env_def_id = tcx.hir().get_parent_item(hir_ty.hir_id);
-    let item_cx = self::collect::ItemCtxt::new(tcx, env_def_id.to_def_id());
+    let item_cx = self::collect::ItemCtxt::new(tcx, env_def_id.def_id);
     item_cx.astconv().ast_ty_to_ty(hir_ty)
 }
 
@@ -505,15 +526,17 @@ pub fn hir_trait_to_predicates<'tcx>(
     // def-ID that will be used to determine the traits/predicates in
     // scope. This is derived from the enclosing item-like thing.
     let env_def_id = tcx.hir().get_parent_item(hir_trait.hir_ref_id);
-    let item_cx = self::collect::ItemCtxt::new(tcx, env_def_id.to_def_id());
+    let item_cx = self::collect::ItemCtxt::new(tcx, env_def_id.def_id);
     let mut bounds = Bounds::default();
     let _ = &item_cx.astconv().instantiate_poly_trait_ref(
         hir_trait,
         DUMMY_SP,
         ty::BoundConstness::NotConst,
+        ty::ImplPolarity::Positive,
         self_ty,
         &mut bounds,
         true,
+        OnlySelfBounds(false),
     );
 
     bounds

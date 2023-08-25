@@ -1,5 +1,5 @@
 use crate::ty::context::TyCtxt;
-use crate::ty::{self, DefId, DefIdTree, ParamEnv, Ty};
+use crate::ty::{self, DefId, ParamEnv, Ty};
 
 /// Represents whether some type is inhabited in a given context.
 /// Examples of uninhabited types are `!`, `enum Void {}`, or a struct
@@ -62,7 +62,18 @@ impl<'tcx> InhabitedPredicate<'tcx> {
                 Some(1..) => Ok(false),
             },
             Self::NotInModule(id) => in_module(id).map(|in_mod| !in_mod),
-            Self::GenericType(_) => Ok(true),
+            // `t` may be a projection, for which `inhabited_predicate` returns a `GenericType`. As
+            // we have a param_env available, we can do better.
+            Self::GenericType(t) => {
+                let normalized_pred = tcx
+                    .try_normalize_erasing_regions(param_env, t)
+                    .map_or(self, |t| t.inhabited_predicate(tcx));
+                match normalized_pred {
+                    // We don't have more information than we started with, so consider inhabited.
+                    Self::GenericType(_) => Ok(true),
+                    pred => pred.apply_inner(tcx, param_env, in_module),
+                }
+            }
             Self::And([a, b]) => try_and(a, b, |x| x.apply_inner(tcx, param_env, in_module)),
             Self::Or([a, b]) => try_or(a, b, |x| x.apply_inner(tcx, param_env, in_module)),
         }
@@ -158,8 +169,8 @@ impl<'tcx> InhabitedPredicate<'tcx> {
     fn subst_opt(self, tcx: TyCtxt<'tcx>, substs: ty::SubstsRef<'tcx>) -> Option<Self> {
         match self {
             Self::ConstIsZero(c) => {
-                let c = ty::EarlyBinder(c).subst(tcx, substs);
-                let pred = match c.kind().try_to_target_usize(tcx) {
+                let c = ty::EarlyBinder::bind(c).subst(tcx, substs);
+                let pred = match c.try_to_target_usize(tcx) {
                     Some(0) => Self::True,
                     Some(1..) => Self::False,
                     None => Self::ConstIsZero(c),
@@ -167,7 +178,7 @@ impl<'tcx> InhabitedPredicate<'tcx> {
                 Some(pred)
             }
             Self::GenericType(t) => {
-                Some(ty::EarlyBinder(t).subst(tcx, substs).inhabited_predicate(tcx))
+                Some(ty::EarlyBinder::bind(t).subst(tcx, substs).inhabited_predicate(tcx))
             }
             Self::And(&[a, b]) => match a.subst_opt(tcx, substs) {
                 None => b.subst_opt(tcx, substs).map(|b| a.and(tcx, b)),

@@ -52,6 +52,7 @@ mod array_into_iter;
 pub mod builtin;
 mod context;
 mod deref_into_dyn_supertrait;
+mod drop_forget_useless;
 mod early;
 mod enum_intrinsics_non_enums;
 mod errors;
@@ -59,6 +60,7 @@ mod expect;
 mod for_loops_over_fallibles;
 pub mod hidden_unicode_codepoints;
 mod internal;
+mod invalid_from_utf8;
 mod late;
 mod let_underscore;
 mod levels;
@@ -74,6 +76,7 @@ mod opaque_hidden_inferred_bound;
 mod pass_by_value;
 mod passes;
 mod redundant_semicolon;
+mod reference_casting;
 mod traits;
 mod types;
 mod unused;
@@ -82,10 +85,10 @@ pub use array_into_iter::ARRAY_INTO_ITER;
 
 use rustc_ast as ast;
 use rustc_errors::{DiagnosticMessage, SubdiagnosticMessage};
+use rustc_fluent_macro::fluent_messages;
 use rustc_hir as hir;
 use rustc_hir::def_id::LocalDefId;
-use rustc_macros::fluent_messages;
-use rustc_middle::ty::query::Providers;
+use rustc_middle::query::Providers;
 use rustc_middle::ty::TyCtxt;
 use rustc_session::lint::builtin::{
     BARE_TRAIT_OBJECTS, ELIDED_LIFETIMES_IN_PATHS, EXPLICIT_OUTLIVES_REQUIREMENTS,
@@ -96,10 +99,12 @@ use rustc_span::Span;
 use array_into_iter::ArrayIntoIter;
 use builtin::*;
 use deref_into_dyn_supertrait::*;
+use drop_forget_useless::*;
 use enum_intrinsics_non_enums::EnumIntrinsicsNonEnums;
 use for_loops_over_fallibles::*;
 use hidden_unicode_codepoints::*;
 use internal::*;
+use invalid_from_utf8::*;
 use let_underscore::*;
 use map_unit_fn::*;
 use methods::*;
@@ -111,6 +116,7 @@ use noop_method_call::*;
 use opaque_hidden_inferred_bound::*;
 use pass_by_value::*;
 use redundant_semicolon::*;
+use reference_casting::*;
 use traits::*;
 use types::*;
 use unused::*;
@@ -126,7 +132,7 @@ pub use rustc_session::lint::Level::{self, *};
 pub use rustc_session::lint::{BufferedEarlyLint, FutureIncompatibleInfo, Lint, LintId};
 pub use rustc_session::lint::{LintArray, LintPass};
 
-fluent_messages! { "../locales/en-US.ftl" }
+fluent_messages! { "../messages.ftl" }
 
 pub fn provide(providers: &mut Providers) {
     levels::provide(providers);
@@ -201,13 +207,16 @@ late_lint_methods!(
         [
             ForLoopsOverFallibles: ForLoopsOverFallibles,
             DerefIntoDynSupertrait: DerefIntoDynSupertrait,
+            DropForgetUseless: DropForgetUseless,
             HardwiredLints: HardwiredLints,
             ImproperCTypesDeclarations: ImproperCTypesDeclarations,
             ImproperCTypesDefinitions: ImproperCTypesDefinitions,
+            InvalidFromUtf8: InvalidFromUtf8,
             VariantSizeDifferences: VariantSizeDifferences,
             BoxPointers: BoxPointers,
             PathStatements: PathStatements,
             LetUnderscore: LetUnderscore,
+            InvalidReferenceCasting: InvalidReferenceCasting,
             // Depends on referenced function signatures in expressions
             UnusedResults: UnusedResults,
             NonUpperCaseGlobals: NonUpperCaseGlobals,
@@ -518,6 +527,7 @@ fn register_internals(store: &mut LintStore) {
     store.register_lints(&TyTyKind::get_lints());
     store.register_late_pass(|_| Box::new(TyTyKind));
     store.register_lints(&Diagnostics::get_lints());
+    store.register_early_pass(|| Box::new(Diagnostics));
     store.register_late_pass(|_| Box::new(Diagnostics));
     store.register_lints(&BadOptAccess::get_lints());
     store.register_late_pass(|_| Box::new(BadOptAccess));

@@ -40,7 +40,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 // Generate better code for things that don't need to be
                 // dropped.
                 if lhs.ty.needs_drop(this.tcx, this.param_env) {
-                    let rhs = unpack!(block = this.as_local_operand(block, rhs));
+                    let rhs = unpack!(block = this.as_local_rvalue(block, rhs));
                     let lhs = unpack!(block = this.as_place(block, lhs));
                     unpack!(block = this.build_drop_and_replace(block, lhs_span, lhs, rhs));
                 } else {
@@ -96,6 +96,13 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             ExprKind::Return { value } => this.break_scope(
                 block,
                 value.map(|value| &this.thir[value]),
+                BreakableTarget::Return,
+                source_info,
+            ),
+            // FIXME(explicit_tail_calls): properly lower tail calls here
+            ExprKind::Become { value } => this.break_scope(
+                block,
+                Some(&this.thir[value]),
                 BreakableTarget::Return,
                 source_info,
             ),

@@ -1,5 +1,5 @@
 use crate::errors::{
-    note_and_explain, FullfillReqLifetime, LfBoundNotSatisfied, OutlivesBound, OutlivesContent,
+    note_and_explain, FulfillReqLifetime, LfBoundNotSatisfied, OutlivesBound, OutlivesContent,
     RefLongerThanData, RegionOriginNote, WhereClauseSuggestions,
 };
 use crate::fluent_generated as fluent;
@@ -11,7 +11,7 @@ use rustc_errors::{
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_middle::traits::ObligationCauseCode;
 use rustc_middle::ty::error::TypeError;
-use rustc_middle::ty::{self, IsSuggestable, Region};
+use rustc_middle::ty::{self, IsSuggestable, Region, Ty};
 use rustc_span::symbol::kw;
 
 use super::ObligationCauseAsDiagArg;
@@ -176,7 +176,7 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
                 let note = note_and_explain::RegionExplanation::new(
                     self.tcx, sub, opt_span, prefix, suffix,
                 );
-                FullfillReqLifetime { span, ty: self.resolve_vars_if_possible(ty), note }
+                FulfillReqLifetime { span, ty: self.resolve_vars_if_possible(ty), note }
                     .into_diagnostic(&self.tcx.sess.parse_sess.span_diagnostic)
             }
             infer::RelateRegionParamBound(span) => {
@@ -304,11 +304,10 @@ impl<'tcx> TypeErrCtxt<'_, 'tcx> {
         let trait_substs = trait_ref
             .subst_identity()
             // Replace the explicit self type with `Self` for better suggestion rendering
-            .with_self_ty(self.tcx, self.tcx.mk_ty_param(0, kw::SelfUpper))
+            .with_self_ty(self.tcx, Ty::new_param(self.tcx, 0, kw::SelfUpper))
             .substs;
-        let trait_item_substs =
-            ty::InternalSubsts::identity_for_item(self.tcx, impl_item_def_id.to_def_id())
-                .rebase_onto(self.tcx, impl_def_id, trait_substs);
+        let trait_item_substs = ty::InternalSubsts::identity_for_item(self.tcx, impl_item_def_id)
+            .rebase_onto(self.tcx, impl_def_id, trait_substs);
 
         let Ok(trait_predicates) = self
             .tcx

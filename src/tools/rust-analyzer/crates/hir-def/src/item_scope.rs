@@ -4,7 +4,7 @@
 use std::collections::hash_map::Entry;
 
 use base_db::CrateId;
-use hir_expand::{attrs::AttrId, name::Name, AstId, MacroCallId};
+use hir_expand::{attrs::AttrId, db::ExpandDatabase, name::Name, AstId, MacroCallId};
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use profile::Count;
@@ -334,10 +334,6 @@ impl ItemScope {
         )
     }
 
-    pub(crate) fn collect_legacy_macros(&self) -> FxHashMap<Name, SmallVec<[MacroId; 1]>> {
-        self.legacy_macros.clone()
-    }
-
     /// Marks everything that is not a procedural macro as private to `this_module`.
     pub(crate) fn censor_non_proc_macros(&mut self, this_module: ModuleId) {
         self.types
@@ -358,12 +354,16 @@ impl ItemScope {
         }
     }
 
-    pub(crate) fn dump(&self, buf: &mut String) {
+    pub(crate) fn dump(&self, db: &dyn ExpandDatabase, buf: &mut String) {
         let mut entries: Vec<_> = self.resolutions().collect();
         entries.sort_by_key(|(name, _)| name.clone());
 
         for (name, def) in entries {
-            format_to!(buf, "{}:", name.map_or("_".to_string(), |name| name.to_string()));
+            format_to!(
+                buf,
+                "{}:",
+                name.map_or("_".to_string(), |name| name.display(db).to_string())
+            );
 
             if def.types.is_some() {
                 buf.push_str(" t");
@@ -431,6 +431,7 @@ impl PerNs {
             ModuleDefId::EnumVariantId(_) => PerNs::both(def, def, v),
             ModuleDefId::ConstId(_) | ModuleDefId::StaticId(_) => PerNs::values(def, v),
             ModuleDefId::TraitId(_) => PerNs::types(def, v),
+            ModuleDefId::TraitAliasId(_) => PerNs::types(def, v),
             ModuleDefId::TypeAliasId(_) => PerNs::types(def, v),
             ModuleDefId::BuiltinType(_) => PerNs::types(def, v),
             ModuleDefId::MacroId(mac) => PerNs::macros(mac, v),

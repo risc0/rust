@@ -8,7 +8,7 @@ use hir::{
 };
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_hir as hir;
-use rustc_index::vec::IndexVec;
+use rustc_index::IndexVec;
 use rustc_infer::infer::InferCtxt;
 use rustc_middle::{
     hir::map::Map,
@@ -190,7 +190,6 @@ impl<'a, 'tcx> DropRangeVisitor<'a, 'tcx> {
             //
             // Some of these may be interesting in the future
             ExprKind::Path(..)
-            | ExprKind::Box(..)
             | ExprKind::ConstBlock(..)
             | ExprKind::Array(..)
             | ExprKind::Call(..)
@@ -215,7 +214,9 @@ impl<'a, 'tcx> DropRangeVisitor<'a, 'tcx> {
             | ExprKind::Break(..)
             | ExprKind::Continue(..)
             | ExprKind::Ret(..)
+            | ExprKind::Become(..)
             | ExprKind::InlineAsm(..)
+            | ExprKind::OffsetOf(..)
             | ExprKind::Struct(..)
             | ExprKind::Repeat(..)
             | ExprKind::Yield(..)
@@ -270,6 +271,7 @@ impl<'a, 'tcx> DropRangeVisitor<'a, 'tcx> {
                 | hir::Node::Variant(..)
                 | hir::Node::Field(..)
                 | hir::Node::AnonConst(..)
+                | hir::Node::ConstBlock(..)
                 | hir::Node::Stmt(..)
                 | hir::Node::PathSegment(..)
                 | hir::Node::Ty(..)
@@ -450,6 +452,8 @@ impl<'a, 'tcx> Visitor<'tcx> for DropRangeVisitor<'a, 'tcx> {
                 }
             }
 
+            ExprKind::Become(_call) => bug!("encountered a tail-call inside a generator"),
+
             ExprKind::Call(f, args) => {
                 self.visit_expr(f);
                 for arg in args {
@@ -478,7 +482,6 @@ impl<'a, 'tcx> Visitor<'tcx> for DropRangeVisitor<'a, 'tcx> {
             | ExprKind::AssignOp(..)
             | ExprKind::Binary(..)
             | ExprKind::Block(..)
-            | ExprKind::Box(..)
             | ExprKind::Cast(..)
             | ExprKind::Closure { .. }
             | ExprKind::ConstBlock(..)
@@ -487,6 +490,7 @@ impl<'a, 'tcx> Visitor<'tcx> for DropRangeVisitor<'a, 'tcx> {
             | ExprKind::Field(..)
             | ExprKind::Index(..)
             | ExprKind::InlineAsm(..)
+            | ExprKind::OffsetOf(..)
             | ExprKind::Let(..)
             | ExprKind::Lit(..)
             | ExprKind::Path(..)
@@ -528,8 +532,9 @@ impl DropRangesBuilder {
         let mut next = <_>::from(0u32);
         for value in tracked_values {
             for_each_consumable(hir, value, |value| {
-                if !tracked_value_map.contains_key(&value) {
-                    tracked_value_map.insert(value, next);
+                if let std::collections::hash_map::Entry::Vacant(e) = tracked_value_map.entry(value)
+                {
+                    e.insert(next);
                     next = next + 1;
                 }
             });

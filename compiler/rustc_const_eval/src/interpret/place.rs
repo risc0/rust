@@ -5,10 +5,12 @@
 use either::{Either, Left, Right};
 
 use rustc_ast::Mutability;
+use rustc_index::IndexSlice;
 use rustc_middle::mir;
 use rustc_middle::ty;
 use rustc_middle::ty::layout::{LayoutOf, TyAndLayout};
-use rustc_target::abi::{self, Abi, Align, HasDataLayout, Size, VariantIdx};
+use rustc_middle::ty::Ty;
+use rustc_target::abi::{self, Abi, Align, FieldIdx, HasDataLayout, Size, FIRST_VARIANT};
 
 use super::{
     alloc_range, mir_assign_valid_types, AllocId, AllocRef, AllocRefMut, CheckInAllocMsg,
@@ -394,7 +396,7 @@ where
         // (Transmuting is okay since this is an in-memory place. We also double-check the size
         // stays the same.)
         let (len, e_ty) = mplace.layout.ty.simd_size_and_type(*self.tcx);
-        let array = self.tcx.mk_array(e_ty, len);
+        let array = Ty::new_array(self.tcx.tcx, e_ty, len);
         let layout = self.layout_of(array)?;
         assert_eq!(layout.size, mplace.layout.size);
         Ok((MPlaceTy { layout, ..*mplace }, len))
@@ -461,7 +463,7 @@ where
     ) -> InterpResult<'tcx> {
         self.write_immediate_no_validate(src, dest)?;
 
-        if M::enforce_validity(self) {
+        if M::enforce_validity(self, dest.layout) {
             // Data got changed, better make sure it matches the type!
             self.validate_operand(&self.place_to_op(dest)?)?;
         }
@@ -616,7 +618,7 @@ where
     ) -> InterpResult<'tcx> {
         self.copy_op_no_validate(src, dest, allow_transmute)?;
 
-        if M::enforce_validity(self) {
+        if M::enforce_validity(self, dest.layout) {
             // Data got changed, better make sure it matches the type!
             self.validate_operand(&self.place_to_op(dest)?)?;
         }
@@ -698,8 +700,13 @@ where
             assert_eq!(src.layout.size, dest.layout.size);
         }
 
+        // Setting `nonoverlapping` here only has an effect when we don't hit the fast-path above,
+        // but that should at least match what LLVM does where `memcpy` is also only used when the
+        // type does not have Scalar/ScalarPair layout.
+        // (Or as the `Assign` docs put it, assignments "not producing primitives" must be
+        // non-overlapping.)
         self.mem_copy(
-            src.ptr, src.align, dest.ptr, dest.align, dest_size, /*nonoverlapping*/ false,
+            src.ptr, src.align, dest.ptr, dest.align, dest_size, /*nonoverlapping*/ true,
         )
     }
 
@@ -774,7 +781,8 @@ where
         let meta = Scalar::from_target_usize(u64::try_from(str.len()).unwrap(), self);
         let mplace = MemPlace { ptr: ptr.into(), meta: MemPlaceMeta::Meta(meta) };
 
-        let ty = self.tcx.mk_ref(
+        let ty = Ty::new_ref(
+            self.tcx.tcx,
             self.tcx.lifetimes.re_static,
             ty::TypeAndMut { ty: self.tcx.types.str_, mutbl },
         );
@@ -787,7 +795,7 @@ where
     pub fn write_aggregate(
         &mut self,
         kind: &mir::AggregateKind<'tcx>,
-        operands: &[mir::Operand<'tcx>],
+        operands: &IndexSlice<FieldIdx, mir::Operand<'tcx>>,
         dest: &PlaceTy<'tcx, M::Provenance>,
     ) -> InterpResult<'tcx> {
         self.write_uninit(&dest)?;
@@ -796,14 +804,14 @@ where
                 let variant_dest = self.place_downcast(&dest, variant_index)?;
                 (variant_index, variant_dest, active_field_index)
             }
-            _ => (VariantIdx::from_u32(0), dest.clone(), None),
+            _ => (FIRST_VARIANT, dest.clone(), None),
         };
         if active_field_index.is_some() {
             assert_eq!(operands.len(), 1);
         }
-        for (field_index, operand) in operands.iter().enumerate() {
+        for (field_index, operand) in operands.iter_enumerated() {
             let field_index = active_field_index.unwrap_or(field_index);
-            let field_dest = self.place_field(&variant_dest, field_index)?;
+            let field_dest = self.place_field(&variant_dest, field_index.as_usize())?;
             let op = self.eval_operand(operand, Some(field_dest.layout))?;
             self.copy_op(&op, &field_dest, /*allow_transmute*/ false)?;
         }

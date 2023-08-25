@@ -6,7 +6,7 @@ use rustc_hir::def_id::DefId;
 use rustc_span::symbol::{kw, Symbol};
 use rustc_span::Span;
 
-use super::{EarlyBoundRegion, InstantiatedPredicates, ParamConst, ParamTy, Predicate, TyCtxt};
+use super::{Clause, EarlyBoundRegion, InstantiatedPredicates, ParamConst, ParamTy, Ty, TyCtxt};
 
 #[derive(Clone, Debug, TyEncodable, TyDecodable, HashStable)]
 pub enum GenericParamDefKind {
@@ -100,11 +100,13 @@ impl GenericParamDef {
         preceding_substs: &[ty::GenericArg<'tcx>],
     ) -> ty::GenericArg<'tcx> {
         match &self.kind {
-            ty::GenericParamDefKind::Lifetime => tcx.mk_re_error_misc().into(),
-            ty::GenericParamDefKind::Type { .. } => tcx.ty_error_misc().into(),
-            ty::GenericParamDefKind::Const { .. } => {
-                tcx.const_error(tcx.type_of(self.def_id).subst(tcx, preceding_substs)).into()
-            }
+            ty::GenericParamDefKind::Lifetime => ty::Region::new_error_misc(tcx).into(),
+            ty::GenericParamDefKind::Type { .. } => Ty::new_misc_error(tcx).into(),
+            ty::GenericParamDefKind::Const { .. } => ty::Const::new_misc_error(
+                tcx,
+                tcx.type_of(self.def_id).subst(tcx, preceding_substs),
+            )
+            .into(),
         }
     }
 }
@@ -133,6 +135,9 @@ pub struct Generics {
 
     pub has_self: bool,
     pub has_late_bound_regions: Option<Span>,
+
+    // The index of the host effect when substituted. (i.e. might be index to parent substs)
+    pub host_effect_index: Option<usize>,
 }
 
 impl<'tcx> Generics {
@@ -298,7 +303,7 @@ impl<'tcx> Generics {
             .iter()
             .rev()
             .take_while(|param| {
-                param.default_value(tcx).map_or(false, |default| {
+                param.default_value(tcx).is_some_and(|default| {
                     default.subst(tcx, substs) == substs[param.index as usize]
                 })
             })
@@ -323,7 +328,7 @@ impl<'tcx> Generics {
 #[derive(Copy, Clone, Default, Debug, TyEncodable, TyDecodable, HashStable)]
 pub struct GenericPredicates<'tcx> {
     pub parent: Option<DefId>,
-    pub predicates: &'tcx [(Predicate<'tcx>, Span)],
+    pub predicates: &'tcx [(Clause<'tcx>, Span)],
 }
 
 impl<'tcx> GenericPredicates<'tcx> {
@@ -341,9 +346,8 @@ impl<'tcx> GenericPredicates<'tcx> {
         &self,
         tcx: TyCtxt<'tcx>,
         substs: SubstsRef<'tcx>,
-    ) -> impl Iterator<Item = (Predicate<'tcx>, Span)> + DoubleEndedIterator + ExactSizeIterator
-    {
-        EarlyBinder(self.predicates).subst_iter_copied(tcx, substs)
+    ) -> impl Iterator<Item = (Clause<'tcx>, Span)> + DoubleEndedIterator + ExactSizeIterator {
+        EarlyBinder::bind(self.predicates).subst_iter_copied(tcx, substs)
     }
 
     #[instrument(level = "debug", skip(self, tcx))]
@@ -358,7 +362,7 @@ impl<'tcx> GenericPredicates<'tcx> {
         }
         instantiated
             .predicates
-            .extend(self.predicates.iter().map(|(p, _)| EarlyBinder(*p).subst(tcx, substs)));
+            .extend(self.predicates.iter().map(|(p, _)| EarlyBinder::bind(*p).subst(tcx, substs)));
         instantiated.spans.extend(self.predicates.iter().map(|(_, sp)| *sp));
     }
 

@@ -99,7 +99,6 @@
 /// ```
 #[cfg_attr(not(test), rustc_diagnostic_item = "Default")]
 #[stable(feature = "rust1", since = "1.0.0")]
-#[const_trait]
 pub trait Default: Sized {
     /// Returns the "default value" for a type.
     ///
@@ -190,9 +189,8 @@ pub macro Default($item:item) {
 macro_rules! default_impl {
     ($t:ty, $v:expr, $doc:tt) => {
         #[stable(feature = "rust1", since = "1.0.0")]
-        #[rustc_const_unstable(feature = "const_default_impls", issue = "87864")]
-        impl const Default for $t {
-            #[inline]
+        impl Default for $t {
+            #[inline(always)]
             #[doc = $doc]
             fn default() -> $t {
                 $v

@@ -52,21 +52,32 @@ pub trait Interner: Sized {
     type PolyFnSig: Clone + Debug + Hash + Ord;
     type ListBinderExistentialPredicate: Clone + Debug + Hash + Ord;
     type BinderListTy: Clone + Debug + Hash + Ord;
-    type ListTy: Clone + Debug + Hash + Ord;
+    type ListTy: Clone + Debug + Hash + Ord + IntoIterator<Item = Self::Ty>;
     type AliasTy: Clone + Debug + Hash + Ord;
     type ParamTy: Clone + Debug + Hash + Ord;
     type BoundTy: Clone + Debug + Hash + Ord;
     type PlaceholderType: Clone + Debug + Hash + Ord;
-    type InferTy: Clone + Debug + Hash + Ord;
     type ErrorGuaranteed: Clone + Debug + Hash + Ord;
     type PredicateKind: Clone + Debug + Hash + PartialEq + Eq;
     type AllocId: Clone + Debug + Hash + Ord;
+
+    type InferConst: Clone + Debug + Hash + Ord;
+    type AliasConst: Clone + Debug + Hash + Ord;
+    type PlaceholderConst: Clone + Debug + Hash + Ord;
+    type ParamConst: Clone + Debug + Hash + Ord;
+    type BoundConst: Clone + Debug + Hash + Ord;
+    type InferTy: Clone + Debug + Hash + Ord;
+    type ValueConst: Clone + Debug + Hash + Ord;
+    type ExprConst: Clone + Debug + Hash + Ord;
 
     type EarlyBoundRegion: Clone + Debug + Hash + Ord;
     type BoundRegion: Clone + Debug + Hash + Ord;
     type FreeRegion: Clone + Debug + Hash + Ord;
     type RegionVid: Clone + Debug + Hash + Ord;
     type PlaceholderRegion: Clone + Debug + Hash + Ord;
+
+    fn ty_and_mut_to_parts(ty_and_mut: Self::TypeAndMut) -> (Self::Ty, Self::Mutability);
+    fn mutability_is_mut(mutbl: Self::Mutability) -> bool;
 }
 
 /// Imagine you have a function `F: FnOnce(&[T]) -> R`, plus an iterator `iter`
@@ -83,7 +94,7 @@ pub trait CollectAndApply<T, R>: Sized {
     /// Produce a result of type `Self::Output` from `iter`. The result will
     /// typically be produced by applying `f` on the elements produced by
     /// `iter`, though this may not happen in some impls, e.g. if an error
-    /// occured during iteration.
+    /// occurred during iteration.
     fn collect_and_apply<I, F>(iter: I, f: F) -> Self::Output
     where
         I: Iterator<Item = Self>,
@@ -179,7 +190,7 @@ bitflags! {
         /// Does this have `ConstKind::Param`?
         const HAS_CT_PARAM                = 1 << 2;
 
-        const NEEDS_SUBST                 = TypeFlags::HAS_TY_PARAM.bits
+        const HAS_PARAM                 = TypeFlags::HAS_TY_PARAM.bits
                                           | TypeFlags::HAS_RE_PARAM.bits
                                           | TypeFlags::HAS_CT_PARAM.bits;
 
@@ -192,7 +203,7 @@ bitflags! {
 
         /// Does this have inference variables? Used to determine whether
         /// inference is required.
-        const NEEDS_INFER                 = TypeFlags::HAS_TY_INFER.bits
+        const HAS_INFER                 = TypeFlags::HAS_TY_INFER.bits
                                           | TypeFlags::HAS_RE_INFER.bits
                                           | TypeFlags::HAS_CT_INFER.bits;
 
@@ -229,29 +240,32 @@ bitflags! {
 
         /// Does this have `Projection`?
         const HAS_TY_PROJECTION           = 1 << 10;
+        /// Does this have `Inherent`?
+        const HAS_TY_INHERENT             = 1 << 11;
         /// Does this have `Opaque`?
-        const HAS_TY_OPAQUE               = 1 << 11;
+        const HAS_TY_OPAQUE               = 1 << 12;
         /// Does this have `ConstKind::Unevaluated`?
-        const HAS_CT_PROJECTION           = 1 << 12;
+        const HAS_CT_PROJECTION           = 1 << 13;
 
         /// Could this type be normalized further?
         const HAS_PROJECTION              = TypeFlags::HAS_TY_PROJECTION.bits
                                           | TypeFlags::HAS_TY_OPAQUE.bits
+                                          | TypeFlags::HAS_TY_INHERENT.bits
                                           | TypeFlags::HAS_CT_PROJECTION.bits;
 
         /// Is an error type/const reachable?
-        const HAS_ERROR                   = 1 << 13;
+        const HAS_ERROR                   = 1 << 14;
 
         /// Does this have any region that "appears free" in the type?
         /// Basically anything but `ReLateBound` and `ReErased`.
-        const HAS_FREE_REGIONS            = 1 << 14;
+        const HAS_FREE_REGIONS            = 1 << 15;
 
         /// Does this have any `ReLateBound` regions?
-        const HAS_RE_LATE_BOUND           = 1 << 15;
+        const HAS_RE_LATE_BOUND           = 1 << 16;
         /// Does this have any `Bound` types?
-        const HAS_TY_LATE_BOUND           = 1 << 16;
+        const HAS_TY_LATE_BOUND           = 1 << 17;
         /// Does this have any `ConstKind::Bound` consts?
-        const HAS_CT_LATE_BOUND           = 1 << 17;
+        const HAS_CT_LATE_BOUND           = 1 << 18;
         /// Does this have any bound variables?
         /// Used to check if a global bound is safe to evaluate.
         const HAS_LATE_BOUND              = TypeFlags::HAS_RE_LATE_BOUND.bits
@@ -259,20 +273,20 @@ bitflags! {
                                           | TypeFlags::HAS_CT_LATE_BOUND.bits;
 
         /// Does this have any `ReErased` regions?
-        const HAS_RE_ERASED               = 1 << 18;
+        const HAS_RE_ERASED               = 1 << 19;
 
         /// Does this value have parameters/placeholders/inference variables which could be
         /// replaced later, in a way that would change the results of `impl` specialization?
-        const STILL_FURTHER_SPECIALIZABLE = 1 << 19;
+        const STILL_FURTHER_SPECIALIZABLE = 1 << 20;
 
         /// Does this value have `InferTy::FreshTy/FreshIntTy/FreshFloatTy`?
-        const HAS_TY_FRESH                = 1 << 20;
+        const HAS_TY_FRESH                = 1 << 21;
 
         /// Does this value have `InferConst::Fresh`?
-        const HAS_CT_FRESH                = 1 << 21;
+        const HAS_CT_FRESH                = 1 << 22;
 
         /// Does this have `Generator` or `GeneratorWitness`?
-        const HAS_TY_GENERATOR            = 1 << 22;
+        const HAS_TY_GENERATOR            = 1 << 23;
     }
 }
 
@@ -387,7 +401,19 @@ impl DebruijnIndex {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub fn debug_bound_var<T: std::fmt::Write>(
+    fmt: &mut T,
+    debruijn: DebruijnIndex,
+    var: impl std::fmt::Debug,
+) -> Result<(), std::fmt::Error> {
+    if debruijn == INNERMOST {
+        write!(fmt, "^{:?}", var)
+    } else {
+        write!(fmt, "^{}_{:?}", debruijn.index(), var)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[derive(Encodable, Decodable, HashStable_Generic)]
 pub enum IntTy {
     Isize,
@@ -432,9 +458,20 @@ impl IntTy {
             _ => *self,
         }
     }
+
+    pub fn to_unsigned(self) -> UintTy {
+        match self {
+            IntTy::Isize => UintTy::Usize,
+            IntTy::I8 => UintTy::U8,
+            IntTy::I16 => UintTy::U16,
+            IntTy::I32 => UintTy::U32,
+            IntTy::I64 => UintTy::U64,
+            IntTy::I128 => UintTy::U128,
+        }
+    }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy, Debug)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Copy)]
 #[derive(Encodable, Decodable, HashStable_Generic)]
 pub enum UintTy {
     Usize,
@@ -479,9 +516,20 @@ impl UintTy {
             _ => *self,
         }
     }
+
+    pub fn to_signed(self) -> IntTy {
+        match self {
+            UintTy::Usize => IntTy::Isize,
+            UintTy::U8 => IntTy::I8,
+            UintTy::U16 => IntTy::I16,
+            UintTy::U32 => IntTy::I32,
+            UintTy::U64 => IntTy::I64,
+            UintTy::U128 => IntTy::I128,
+        }
+    }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[derive(Encodable, Decodable, HashStable_Generic)]
 pub enum FloatTy {
     F32,
@@ -515,7 +563,7 @@ pub struct FloatVarValue(pub FloatTy);
 
 rustc_index::newtype_index! {
     /// A **ty**pe **v**ariable **ID**.
-    #[debug_format = "_#{}t"]
+    #[debug_format = "?{}t"]
     pub struct TyVid {}
 }
 
@@ -618,7 +666,7 @@ impl UnifyKey for FloatVid {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Decodable, Encodable, Hash, HashStable_Generic)]
+#[derive(Copy, Clone, PartialEq, Eq, Decodable, Encodable, Hash, HashStable_Generic)]
 #[rustc_pass_by_value]
 pub enum Variance {
     Covariant,     // T<A> <: T<B> iff A <: B -- e.g., function return type
@@ -717,13 +765,13 @@ impl fmt::Debug for FloatVarValue {
 
 impl fmt::Debug for IntVid {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "_#{}i", self.index)
+        write!(f, "?{}i", self.index)
     }
 }
 
 impl fmt::Debug for FloatVid {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "_#{}f", self.index)
+        write!(f, "?{}f", self.index)
     }
 }
 

@@ -21,7 +21,6 @@ export class Config {
         "serverPath",
         "server",
         "files",
-        "lens", // works as lens.*
     ].map((opt) => `${this.rootSection}.${opt}`);
 
     readonly package: {
@@ -34,6 +33,7 @@ export class Config {
 
     constructor(ctx: vscode.ExtensionContext) {
         this.globalStorageUri = ctx.globalStorageUri;
+        this.discoveredWorkspaces = [];
         vscode.workspace.onDidChangeConfiguration(
             this.onDidChangeConfiguration,
             this,
@@ -55,6 +55,8 @@ export class Config {
         log.info("Using configuration", Object.fromEntries(cfg));
     }
 
+    public discoveredWorkspaces: JsonProject[];
+
     private async onDidChangeConfiguration(event: vscode.ConfigurationChangeEvent) {
         this.refreshLogging();
 
@@ -67,7 +69,7 @@ export class Config {
         if (!requiresReloadOpt) return;
 
         if (this.restartServerOnConfigChange) {
-            await vscode.commands.executeCommand("rust-analyzer.reload");
+            await vscode.commands.executeCommand("rust-analyzer.restartServer");
             return;
         }
 
@@ -75,7 +77,7 @@ export class Config {
         const userResponse = await vscode.window.showInformationMessage(message, "Restart now");
 
         if (userResponse) {
-            const command = "rust-analyzer.reload";
+            const command = "rust-analyzer.restartServer";
             await vscode.commands.executeCommand(command);
         }
     }
@@ -191,7 +193,7 @@ export class Config {
      * So this getter handles this quirk by not requiring the caller to use postfix `!`
      */
     private get<T>(path: string): T | undefined {
-        return substituteVSCodeVariables(this.cfg.get<T>(path));
+        return prepareVSCodeConfig(this.cfg.get<T>(path));
     }
 
     get serverPath() {
@@ -212,6 +214,10 @@ export class Config {
     }
     get traceExtension() {
         return this.get<boolean>("trace.extension");
+    }
+
+    get discoverProjectCommand() {
+        return this.get<string[] | undefined>("discoverProjectCommand");
     }
 
     get cargoRunner() {
@@ -278,20 +284,38 @@ export class Config {
     get useRustcErrorCode() {
         return this.get<boolean>("diagnostics.useRustcErrorCode");
     }
+
+    get showDependenciesExplorer() {
+        return this.get<boolean>("showDependenciesExplorer");
+    }
 }
 
-export function substituteVSCodeVariables<T>(resp: T): T {
+// the optional `cb?` parameter is meant to be used to add additional
+// key/value pairs to the VS Code configuration. This needed for, e.g.,
+// including a `rust-project.json` into the `linkedProjects` key as part
+// of the configuration/InitializationParams _without_ causing VS Code
+// configuration to be written out to workspace-level settings. This is
+// undesirable behavior because rust-project.json files can be tens of
+// thousands of lines of JSON, most of which is not meant for humans
+// to interact with.
+export function prepareVSCodeConfig<T>(
+    resp: T,
+    cb?: (key: Extract<keyof T, string>, res: { [key: string]: any }) => void
+): T {
     if (Is.string(resp)) {
         return substituteVSCodeVariableInString(resp) as T;
     } else if (resp && Is.array<any>(resp)) {
         return resp.map((val) => {
-            return substituteVSCodeVariables(val);
+            return prepareVSCodeConfig(val);
         }) as T;
     } else if (resp && typeof resp === "object") {
         const res: { [key: string]: any } = {};
         for (const key in resp) {
             const val = resp[key];
-            res[key] = substituteVSCodeVariables(val);
+            res[key] = prepareVSCodeConfig(val);
+            if (cb) {
+                cb(key, res);
+            }
         }
         return res as T;
     }

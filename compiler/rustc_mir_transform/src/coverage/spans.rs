@@ -1,4 +1,3 @@
-use super::debug::term_type;
 use super::graph::{BasicCoverageBlock, BasicCoverageBlockData, CoverageGraph, START_BCB};
 
 use itertools::Itertools;
@@ -40,7 +39,7 @@ impl CoverageStatement {
                     "{}: @{}.{}: {:?}",
                     source_range_no_file(tcx, span),
                     bb.index(),
-                    term_type(&term.kind),
+                    term.kind.name(),
                     term.kind
                 )
             }
@@ -345,7 +344,7 @@ impl<'a, 'tcx> CoverageSpans<'a, 'tcx> {
                         // before the dominated equal spans). When later comparing two spans in
                         // order, the first will either dominate the second, or they will have no
                         // dominator relationship.
-                        self.basic_coverage_blocks.dominators().rank_partial_cmp(a.bcb, b.bcb)
+                        self.basic_coverage_blocks.rank_partial_cmp(a.bcb, b.bcb)
                     }
                 } else {
                     // Sort hi() in reverse order so shorter spans are attempted after longer spans.
@@ -481,9 +480,10 @@ impl<'a, 'tcx> CoverageSpans<'a, 'tcx> {
 
     fn check_invoked_macro_name_span(&mut self) {
         if let Some(visible_macro) = self.curr().visible_macro(self.body_span) {
-            if self.prev_expn_span.map_or(true, |prev_expn_span| {
-                self.curr().expn_span.ctxt() != prev_expn_span.ctxt()
-            }) {
+            if !self
+                .prev_expn_span
+                .is_some_and(|prev_expn_span| self.curr().expn_span.ctxt() == prev_expn_span.ctxt())
+            {
                 let merged_prefix_len = self.curr_original_span.lo() - self.curr().span.lo();
                 let after_macro_bang =
                     merged_prefix_len + BytePos(visible_macro.as_str().len() as u32 + 1);
@@ -832,6 +832,7 @@ pub(super) fn filtered_statement_span(statement: &Statement<'_>) -> Option<Span>
         | StatementKind::SetDiscriminant { .. }
         | StatementKind::Deinit(..)
         | StatementKind::Retag(_, _)
+        | StatementKind::PlaceMention(..)
         | StatementKind::AscribeUserType(_, _) => {
             Some(statement.source_info.span)
         }
@@ -850,7 +851,6 @@ pub(super) fn filtered_terminator_span(terminator: &Terminator<'_>) -> Option<Sp
         TerminatorKind::Unreachable // Unreachable blocks are not connected to the MIR CFG
         | TerminatorKind::Assert { .. }
         | TerminatorKind::Drop { .. }
-        | TerminatorKind::DropAndReplace { .. }
         | TerminatorKind::SwitchInt { .. }
         // For `FalseEdge`, only the `real` branch is taken, so it is similar to a `Goto`.
         | TerminatorKind::FalseEdge { .. }
@@ -869,7 +869,7 @@ pub(super) fn filtered_terminator_span(terminator: &Terminator<'_>) -> Option<Sp
 
         // Retain spans from all other terminators
         TerminatorKind::Resume
-        | TerminatorKind::Abort
+        | TerminatorKind::Terminate
         | TerminatorKind::Return
         | TerminatorKind::Yield { .. }
         | TerminatorKind::GeneratorDrop

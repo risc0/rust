@@ -225,6 +225,7 @@ pub fn change_mutability_of_binding_in_pattern(x: u32) -> u32 {
     }
 }
 
+// Ignore optimized_mir in cfail2, the only change to optimized MIR is a span.
 #[cfg(not(any(cfail1,cfail4)))]
 #[rustc_clean(cfg="cfail2", except="hir_owner_nodes,optimized_mir,typeck")]
 #[rustc_clean(cfg="cfail3")]

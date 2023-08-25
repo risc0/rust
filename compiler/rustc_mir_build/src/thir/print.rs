@@ -3,7 +3,7 @@ use rustc_middle::ty::{self, TyCtxt};
 use rustc_span::def_id::LocalDefId;
 use std::fmt::{self, Write};
 
-pub(crate) fn thir_tree(tcx: TyCtxt<'_>, owner_def: ty::WithOptConstParam<LocalDefId>) -> String {
+pub(crate) fn thir_tree(tcx: TyCtxt<'_>, owner_def: LocalDefId) -> String {
     match super::cx::thir_body(tcx, owner_def) {
         Ok((thir, _)) => {
             let thir = thir.steal();
@@ -15,7 +15,7 @@ pub(crate) fn thir_tree(tcx: TyCtxt<'_>, owner_def: ty::WithOptConstParam<LocalD
     }
 }
 
-pub(crate) fn thir_flat(tcx: TyCtxt<'_>, owner_def: ty::WithOptConstParam<LocalDefId>) -> String {
+pub(crate) fn thir_flat(tcx: TyCtxt<'_>, owner_def: LocalDefId) -> String {
     match super::cx::thir_body(tcx, owner_def) {
         Ok((thir, _)) => format!("{:#?}", thir.steal()),
         Err(_) => "error".into(),
@@ -151,6 +151,7 @@ impl<'a, 'tcx> ThirPrinter<'a, 'tcx> {
                 initializer,
                 else_block,
                 lint_level,
+                span,
             } => {
                 print_indented!(self, "kind: Let {", depth_lvl + 1);
                 print_indented!(
@@ -181,6 +182,7 @@ impl<'a, 'tcx> ThirPrinter<'a, 'tcx> {
                 }
 
                 print_indented!(self, format!("lint_level: {:?}", lint_level), depth_lvl + 2);
+                print_indented!(self, format!("span: {:?}", span), depth_lvl + 2);
                 print_indented!(self, "}", depth_lvl + 1);
             }
         }
@@ -299,7 +301,7 @@ impl<'a, 'tcx> ThirPrinter<'a, 'tcx> {
                 self.print_expr(*source, depth_lvl + 2);
                 print_indented!(self, "}", depth_lvl);
             }
-            Pointer { cast, source } => {
+            PointerCoercion { cast, source } => {
                 print_indented!(self, "Pointer {", depth_lvl);
                 print_indented!(self, format!("cast: {:?}", cast), depth_lvl + 1);
                 print_indented!(self, "source:", depth_lvl + 1);
@@ -419,6 +421,12 @@ impl<'a, 'tcx> ThirPrinter<'a, 'tcx> {
 
                 print_indented!(self, "}", depth_lvl);
             }
+            Become { value } => {
+                print_indented!(self, "Become {", depth_lvl);
+                print_indented!(self, "value:", depth_lvl + 1);
+                self.print_expr(*value, depth_lvl + 2);
+                print_indented!(self, "}", depth_lvl);
+            }
             ConstBlock { did, substs } => {
                 print_indented!(self, "ConstBlock {", depth_lvl);
                 print_indented!(self, format!("did: {:?}", did), depth_lvl + 1);
@@ -515,6 +523,19 @@ impl<'a, 'tcx> ThirPrinter<'a, 'tcx> {
                 print_indented!(self, "InlineAsm {", depth_lvl);
                 print_indented!(self, "expr:", depth_lvl + 1);
                 self.print_inline_asm_expr(&**expr, depth_lvl + 2);
+                print_indented!(self, "}", depth_lvl);
+            }
+            OffsetOf { container, fields } => {
+                print_indented!(self, "OffsetOf {", depth_lvl);
+                print_indented!(self, format!("container: {:?}", container), depth_lvl + 1);
+                print_indented!(self, "fields: [", depth_lvl + 1);
+
+                for field in fields.iter() {
+                    print_indented!(self, format!("{:?}", field), depth_lvl + 2);
+                    print_indented!(self, ",", depth_lvl + 1);
+                }
+
+                print_indented!(self, "]", depth_lvl + 1);
                 print_indented!(self, "}", depth_lvl);
             }
             ThreadLocalRef(def_id) => {

@@ -5,6 +5,7 @@ use crate::{mir, ty};
 
 use std::fmt::Write;
 
+use crate::query::Providers;
 use rustc_data_structures::fx::{FxHashMap, FxIndexMap};
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::{self as hir, LangItem};
@@ -158,12 +159,12 @@ impl<'tcx> CapturedPlace<'tcx> {
         for proj in self.place.projections.iter() {
             match proj.kind {
                 HirProjectionKind::Field(idx, variant) => match ty.kind() {
-                    ty::Tuple(_) => write!(&mut symbol, "__{}", idx).unwrap(),
+                    ty::Tuple(_) => write!(&mut symbol, "__{}", idx.index()).unwrap(),
                     ty::Adt(def, ..) => {
                         write!(
                             &mut symbol,
                             "__{}",
-                            def.variant(variant).fields[idx as usize].name.as_str(),
+                            def.variant(variant).fields[idx].name.as_str(),
                         )
                         .unwrap();
                     }
@@ -356,11 +357,11 @@ pub fn place_to_string_for_capture<'tcx>(tcx: TyCtxt<'tcx>, place: &HirPlace<'tc
                     curr_string = format!(
                         "{}.{}",
                         curr_string,
-                        def.variant(variant).fields[idx as usize].name.as_str()
+                        def.variant(variant).fields[idx].name.as_str()
                     );
                 }
                 ty::Tuple(_) => {
-                    curr_string = format!("{}.{}", curr_string, idx);
+                    curr_string = format!("{}.{}", curr_string, idx.index());
                 }
                 _ => {
                     bug!(
@@ -426,6 +427,8 @@ pub enum BorrowKind {
     /// immutable, but not aliasable. This solves the problem. For
     /// simplicity, we don't give users the way to express this
     /// borrow, it's just used when translating closures.
+    ///
+    /// FIXME: Rename this to indicate the borrow is actually not immutable.
     UniqueImmBorrow,
 
     /// Data is mutable and not aliasable.
@@ -457,6 +460,6 @@ impl BorrowKind {
     }
 }
 
-pub fn provide(providers: &mut ty::query::Providers) {
-    *providers = ty::query::Providers { closure_typeinfo, ..*providers }
+pub fn provide(providers: &mut Providers) {
+    *providers = Providers { closure_typeinfo, ..*providers }
 }

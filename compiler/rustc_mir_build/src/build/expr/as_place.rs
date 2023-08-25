@@ -13,9 +13,7 @@ use rustc_middle::thir::*;
 use rustc_middle::ty::AdtDef;
 use rustc_middle::ty::{self, CanonicalUserTypeAnnotation, Ty, Variance};
 use rustc_span::Span;
-use rustc_target::abi::VariantIdx;
-
-use rustc_index::vec::Idx;
+use rustc_target::abi::{FieldIdx, VariantIdx, FIRST_VARIANT};
 
 use std::assert_matches::assert_matches;
 use std::iter;
@@ -91,8 +89,8 @@ fn convert_to_hir_projections_and_truncate_for_capture(
         let hir_projection = match mir_projection {
             ProjectionElem::Deref => HirProjectionKind::Deref,
             ProjectionElem::Field(field, _) => {
-                let variant = variant.unwrap_or(VariantIdx::new(0));
-                HirProjectionKind::Field(field.index() as u32, variant)
+                let variant = variant.unwrap_or(FIRST_VARIANT);
+                HirProjectionKind::Field(*field, variant)
             }
             ProjectionElem::Downcast(.., idx) => {
                 // We don't expect to see multi-variant enums here, as earlier
@@ -295,7 +293,7 @@ impl<'tcx> PlaceBuilder<'tcx> {
         &self.projection
     }
 
-    pub(crate) fn field(self, f: Field, ty: Ty<'tcx>) -> Self {
+    pub(crate) fn field(self, f: FieldIdx, ty: Ty<'tcx>) -> Self {
         self.project(PlaceElem::Field(f, ty))
     }
 
@@ -537,7 +535,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             | ExprKind::Cast { .. }
             | ExprKind::Use { .. }
             | ExprKind::NeverToAny { .. }
-            | ExprKind::Pointer { .. }
+            | ExprKind::PointerCoercion { .. }
             | ExprKind::Repeat { .. }
             | ExprKind::Borrow { .. }
             | ExprKind::AddressOf { .. }
@@ -551,6 +549,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             | ExprKind::Break { .. }
             | ExprKind::Continue { .. }
             | ExprKind::Return { .. }
+            | ExprKind::Become { .. }
             | ExprKind::Literal { .. }
             | ExprKind::NamedConst { .. }
             | ExprKind::NonHirLiteral { .. }
@@ -559,6 +558,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             | ExprKind::ConstBlock { .. }
             | ExprKind::StaticRef { .. }
             | ExprKind::InlineAsm { .. }
+            | ExprKind::OffsetOf { .. }
             | ExprKind::Yield { .. }
             | ExprKind::ThreadLocalRef(_)
             | ExprKind::Call { .. } => {
@@ -678,21 +678,15 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             // check that we just did stays valid. Since we can't assign to
             // unsized values, we only need to ensure that none of the
             // pointers in the base place are modified.
-            for (idx, elem) in base_place.projection.iter().enumerate().rev() {
+            for (base_place, elem) in base_place.iter_projections().rev() {
                 match elem {
                     ProjectionElem::Deref => {
-                        let fake_borrow_deref_ty = Place::ty_from(
-                            base_place.local,
-                            &base_place.projection[..idx],
-                            &self.local_decls,
-                            tcx,
-                        )
-                        .ty;
+                        let fake_borrow_deref_ty = base_place.ty(&self.local_decls, tcx).ty;
                         let fake_borrow_ty =
-                            tcx.mk_imm_ref(tcx.lifetimes.re_erased, fake_borrow_deref_ty);
+                            Ty::new_imm_ref(tcx, tcx.lifetimes.re_erased, fake_borrow_deref_ty);
                         let fake_borrow_temp =
                             self.local_decls.push(LocalDecl::new(fake_borrow_ty, expr_span));
-                        let projection = tcx.mk_place_elems(&base_place.projection[..idx]);
+                        let projection = tcx.mk_place_elems(&base_place.projection);
                         self.cfg.push_assign(
                             block,
                             source_info,
@@ -706,12 +700,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                         fake_borrow_temps.push(fake_borrow_temp);
                     }
                     ProjectionElem::Index(_) => {
-                        let index_ty = Place::ty_from(
-                            base_place.local,
-                            &base_place.projection[..idx],
-                            &self.local_decls,
-                            tcx,
-                        );
+                        let index_ty = base_place.ty(&self.local_decls, tcx);
                         match index_ty.ty.kind() {
                             // The previous index expression has already
                             // done any index expressions needed here.

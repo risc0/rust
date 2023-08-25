@@ -140,7 +140,7 @@ impl<'a, 'tcx> SigDropChecker<'a, 'tcx> {
                     }
                 }
 
-                for generic_arg in b.iter() {
+                for generic_arg in *b {
                     if let GenericArgKind::Type(ty) = generic_arg.unpack() {
                         if self.has_sig_drop_attr(cx, ty) {
                             return true;
@@ -321,7 +321,6 @@ impl<'a, 'tcx> Visitor<'tcx> for SigDropHelper<'a, 'tcx> {
                     self.has_significant_drop = true;
                 }
             }
-            ExprKind::Box(..) |
             ExprKind::Array(..) |
             ExprKind::Call(..) |
             ExprKind::Unary(..) |
@@ -330,6 +329,7 @@ impl<'a, 'tcx> Visitor<'tcx> for SigDropHelper<'a, 'tcx> {
             ExprKind::Field(..) |
             ExprKind::Index(..) |
             ExprKind::Ret(..) |
+            ExprKind::Become(..) |
             ExprKind::Repeat(..) |
             ExprKind::Yield(..) => walk_expr(self, ex),
             ExprKind::AddrOf(_, _, _) |
@@ -343,6 +343,7 @@ impl<'a, 'tcx> Visitor<'tcx> for SigDropHelper<'a, 'tcx> {
             ExprKind::DropTemps(_) |
             ExprKind::Err(_) |
             ExprKind::InlineAsm(_) |
+            ExprKind::OffsetOf(_, _) |
             ExprKind::Let(_) |
             ExprKind::Lit(_) |
             ExprKind::Loop(_, _, _, _) |

@@ -28,7 +28,7 @@ pub(crate) fn maybe_create_entry_wrapper(
 
     if main_def_id.is_local() {
         let instance = Instance::mono(tcx, main_def_id).polymorphize(tcx);
-        if !is_jit && module.get_name(&*tcx.symbol_name(instance).name).is_none() {
+        if !is_jit && module.get_name(tcx.symbol_name(instance).name).is_none() {
             return;
         }
     } else if !is_primary_cgu {
@@ -75,7 +75,7 @@ pub(crate) fn maybe_create_entry_wrapper(
             Ok(func_id) => func_id,
             Err(err) => {
                 tcx.sess
-                    .fatal(&format!("entry symbol `{entry_name}` declared multiple times: {err}"));
+                    .fatal(format!("entry symbol `{entry_name}` declared multiple times: {err}"));
             }
         };
 
@@ -171,7 +171,7 @@ pub(crate) fn maybe_create_entry_wrapper(
         }
 
         if let Err(err) = m.define_function(cmain_func_id, &mut ctx) {
-            tcx.sess.fatal(&format!("entry symbol `{entry_name}` defined multiple times: {err}"));
+            tcx.sess.fatal(format!("entry symbol `{entry_name}` defined multiple times: {err}"));
         }
 
         unwind_context.add_function(cmain_func_id, &ctx, m.isa());

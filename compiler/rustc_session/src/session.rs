@@ -1,8 +1,10 @@
 use crate::cgu_reuse_tracker::CguReuseTracker;
 use crate::code_stats::CodeStats;
 pub use crate::code_stats::{DataTypeKind, FieldInfo, FieldKind, SizeKind, VariantInfo};
-use crate::config::Input;
-use crate::config::{self, CrateType, InstrumentCoverage, OptLevel, OutputType, SwitchWithOptPath};
+use crate::config::{
+    self, CrateType, InstrumentCoverage, OptLevel, OutFileName, OutputType, SwitchWithOptPath,
+};
+use crate::config::{ErrorOutputType, Input};
 use crate::errors;
 use crate::parse::{add_feature_diagnostics, ParseSess};
 use crate::search_paths::{PathKind, SearchPath};
@@ -11,7 +13,7 @@ use crate::{filesearch, lint};
 pub use rustc_ast::attr::MarkedAttrs;
 pub use rustc_ast::Attribute;
 use rustc_data_structures::flock;
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_data_structures::fx::{FxHashMap, FxIndexSet};
 use rustc_data_structures::jobserver::{self, Client};
 use rustc_data_structures::profiling::{duration_to_secs_str, SelfProfiler, SelfProfilerRef};
 use rustc_data_structures::sync::{
@@ -23,14 +25,14 @@ use rustc_errors::json::JsonEmitter;
 use rustc_errors::registry::Registry;
 use rustc_errors::{
     error_code, fallback_fluent_bundle, DiagnosticBuilder, DiagnosticId, DiagnosticMessage,
-    ErrorGuaranteed, FluentBundle, IntoDiagnostic, LazyFallbackBundle, MultiSpan, Noted,
+    ErrorGuaranteed, FluentBundle, Handler, IntoDiagnostic, LazyFallbackBundle, MultiSpan, Noted,
     TerminalUrl,
 };
 use rustc_macros::HashStable_Generic;
 pub use rustc_span::def_id::StableCrateId;
 use rustc_span::edition::Edition;
 use rustc_span::source_map::{FileLoader, RealFileLoader, SourceMap, Span};
-use rustc_span::{sym, SourceFileHashAlgorithm, Symbol};
+use rustc_span::{SourceFileHashAlgorithm, Symbol};
 use rustc_target::asm::InlineAsmArch;
 use rustc_target::spec::{CodeModel, PanicStrategy, RelocModel, RelroLevel};
 use rustc_target::spec::{
@@ -128,14 +130,12 @@ pub struct Limits {
     pub move_size_limit: Limit,
     /// The maximum length of types during monomorphization.
     pub type_length_limit: Limit,
-    /// The maximum blocks a const expression can evaluate.
-    pub const_eval_limit: Limit,
 }
 
 pub struct CompilerIO {
     pub input: Input,
     pub output_dir: Option<PathBuf>,
-    pub output_file: Option<PathBuf>,
+    pub output_file: Option<OutFileName>,
     pub temps_dir: Option<PathBuf>,
 }
 
@@ -207,10 +207,13 @@ pub struct Session {
     pub asm_arch: Option<InlineAsmArch>,
 
     /// Set of enabled features for the current target.
-    pub target_features: FxHashSet<Symbol>,
+    pub target_features: FxIndexSet<Symbol>,
 
     /// Set of enabled features for the current target, including unstable ones.
-    pub unstable_target_features: FxHashSet<Symbol>,
+    pub unstable_target_features: FxIndexSet<Symbol>,
+
+    /// The version of the rustc process, possibly including a commit hash and description.
+    pub cfg_version: &'static str,
 }
 
 pub struct PerfStats {
@@ -222,6 +225,34 @@ pub struct PerfStats {
     pub normalize_generic_arg_after_erasing_regions: AtomicUsize,
     /// Number of times this query is invoked.
     pub normalize_projection_ty: AtomicUsize,
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+pub enum MetadataKind {
+    None,
+    Uncompressed,
+    Compressed,
+}
+
+#[derive(Clone, Copy)]
+pub enum CodegenUnits {
+    /// Specified by the user. In this case we try fairly hard to produce the
+    /// number of CGUs requested.
+    User(usize),
+
+    /// A default value, i.e. not specified by the user. In this case we take
+    /// more liberties about CGU formation, e.g. avoid producing very small
+    /// CGUs.
+    Default(usize),
+}
+
+impl CodegenUnits {
+    pub fn as_usize(self) -> usize {
+        match self {
+            CodegenUnits::User(n) => n,
+            CodegenUnits::Default(n) => n,
+        }
+    }
 }
 
 impl Session {
@@ -285,6 +316,43 @@ impl Session {
 
     pub fn crate_types(&self) -> &[CrateType] {
         self.crate_types.get().unwrap().as_slice()
+    }
+
+    /// Returns true if the crate is a testing one.
+    pub fn is_test_crate(&self) -> bool {
+        self.opts.test
+    }
+
+    pub fn needs_crate_hash(&self) -> bool {
+        // Why is the crate hash needed for these configurations?
+        // - debug_assertions: for the "fingerprint the result" check in
+        //   `rustc_query_system::query::plumbing::execute_job`.
+        // - incremental: for query lookups.
+        // - needs_metadata: for putting into crate metadata.
+        // - instrument_coverage: for putting into coverage data (see
+        //   `hash_mir_source`).
+        cfg!(debug_assertions)
+            || self.opts.incremental.is_some()
+            || self.needs_metadata()
+            || self.instrument_coverage()
+    }
+
+    pub fn metadata_kind(&self) -> MetadataKind {
+        self.crate_types()
+            .iter()
+            .map(|ty| match *ty {
+                CrateType::Executable | CrateType::Staticlib | CrateType::Cdylib => {
+                    MetadataKind::None
+                }
+                CrateType::Rlib => MetadataKind::Uncompressed,
+                CrateType::Dylib | CrateType::ProcMacro => MetadataKind::Compressed,
+            })
+            .max()
+            .unwrap_or(MetadataKind::None)
+    }
+
+    pub fn needs_metadata(&self) -> bool {
+        self.metadata_kind() != MetadataKind::None
     }
 
     pub fn init_crate_types(&self, crate_types: Vec<CrateType>) {
@@ -443,20 +511,6 @@ impl Session {
     #[rustc_lint_diagnostics]
     pub fn fatal(&self, msg: impl Into<DiagnosticMessage>) -> ! {
         self.diagnostic().fatal(msg).raise()
-    }
-    #[rustc_lint_diagnostics]
-    #[track_caller]
-    pub fn span_err_or_warn<S: Into<MultiSpan>>(
-        &self,
-        is_warning: bool,
-        sp: S,
-        msg: impl Into<DiagnosticMessage>,
-    ) {
-        if is_warning {
-            self.span_warn(sp, msg);
-        } else {
-            self.span_err(sp, msg);
-        }
     }
     #[rustc_lint_diagnostics]
     #[track_caller]
@@ -722,8 +776,28 @@ impl Session {
         self.opts.unstable_opts.sanitizer.contains(SanitizerSet::CFI)
     }
 
+    pub fn is_sanitizer_cfi_canonical_jump_tables_disabled(&self) -> bool {
+        self.opts.unstable_opts.sanitizer_cfi_canonical_jump_tables == Some(false)
+    }
+
+    pub fn is_sanitizer_cfi_canonical_jump_tables_enabled(&self) -> bool {
+        self.opts.unstable_opts.sanitizer_cfi_canonical_jump_tables == Some(true)
+    }
+
+    pub fn is_sanitizer_cfi_generalize_pointers_enabled(&self) -> bool {
+        self.opts.unstable_opts.sanitizer_cfi_generalize_pointers == Some(true)
+    }
+
+    pub fn is_sanitizer_cfi_normalize_integers_enabled(&self) -> bool {
+        self.opts.unstable_opts.sanitizer_cfi_normalize_integers == Some(true)
+    }
+
     pub fn is_sanitizer_kcfi_enabled(&self) -> bool {
         self.opts.unstable_opts.sanitizer.contains(SanitizerSet::KCFI)
+    }
+
+    pub fn is_split_lto_unit_enabled(&self) -> bool {
+        self.opts.unstable_opts.split_lto_unit == Some(true)
     }
 
     /// Check whether this compile session and crate type use static crt.
@@ -767,7 +841,7 @@ impl Session {
     }
 
     pub fn generate_proc_macro_decls_symbol(&self, stable_crate_id: StableCrateId) -> String {
-        format!("__rustc_proc_macro_decls_{:08x}__", stable_crate_id.to_u64())
+        format!("__rustc_proc_macro_decls_{:08x}__", stable_crate_id.as_u64())
     }
 
     pub fn target_filesearch(&self, kind: PathKind) -> filesearch::FileSearch<'_> {
@@ -935,11 +1009,11 @@ impl Session {
         self.edition().rust_2024()
     }
 
-    /// Returns `true` if we cannot skip the PLT for shared library calls.
+    /// Returns `true` if we should use the PLT for shared library calls.
     pub fn needs_plt(&self) -> bool {
-        // Check if the current target usually needs PLT to be enabled.
+        // Check if the current target usually wants PLT to be enabled.
         // The user can use the command line flag to override it.
-        let needs_plt = self.target.needs_plt;
+        let want_plt = self.target.plt_by_default;
 
         let dbg_opts = &self.opts.unstable_opts;
 
@@ -951,8 +1025,8 @@ impl Session {
         let full_relro = RelroLevel::Full == relro_level;
 
         // If user didn't explicitly forced us to use / skip the PLT,
-        // then try to skip it where possible.
-        dbg_opts.plt.unwrap_or(needs_plt || !full_relro)
+        // then use it unless the target doesn't want it by default or the full relro forces it on.
+        dbg_opts.plt.unwrap_or(want_plt || !full_relro)
     }
 
     /// Checks if LLVM lifetime markers should be emitted.
@@ -962,40 +1036,6 @@ impl Session {
         // MemorySanitizer uses lifetimes to detect use of uninitialized stack variables.
         // HWAddressSanitizer will use lifetimes to detect use after scope bugs in the future.
         || self.opts.unstable_opts.sanitizer.intersects(SanitizerSet::ADDRESS | SanitizerSet::KERNELADDRESS | SanitizerSet::MEMORY | SanitizerSet::HWADDRESS)
-    }
-
-    pub fn is_proc_macro_attr(&self, attr: &Attribute) -> bool {
-        [sym::proc_macro, sym::proc_macro_attribute, sym::proc_macro_derive]
-            .iter()
-            .any(|kind| attr.has_name(*kind))
-    }
-
-    pub fn contains_name(&self, attrs: &[Attribute], name: Symbol) -> bool {
-        attrs.iter().any(|item| item.has_name(name))
-    }
-
-    pub fn find_by_name<'a>(
-        &'a self,
-        attrs: &'a [Attribute],
-        name: Symbol,
-    ) -> Option<&'a Attribute> {
-        attrs.iter().find(|attr| attr.has_name(name))
-    }
-
-    pub fn filter_by_name<'a>(
-        &'a self,
-        attrs: &'a [Attribute],
-        name: Symbol,
-    ) -> impl Iterator<Item = &'a Attribute> {
-        attrs.iter().filter(move |attr| attr.has_name(name))
-    }
-
-    pub fn first_attr_value_str_by_name(
-        &self,
-        attrs: &[Attribute],
-        name: Symbol,
-    ) -> Option<Symbol> {
-        attrs.iter().find(|at| at.has_name(name)).and_then(|at| at.value_str())
     }
 
     pub fn diagnostic_width(&self) -> usize {
@@ -1085,7 +1125,7 @@ impl Session {
 
         // If there's only one codegen unit and LTO isn't enabled then there's
         // no need for ThinLTO so just return false.
-        if self.codegen_units() == 1 {
+        if self.codegen_units().as_usize() == 1 {
             return config::Lto::No;
         }
 
@@ -1180,25 +1220,26 @@ impl Session {
 
     /// Returns the number of query threads that should be used for this
     /// compilation
+    #[inline]
     pub fn threads(&self) -> usize {
         self.opts.unstable_opts.threads
     }
 
     /// Returns the number of codegen units that should be used for this
     /// compilation
-    pub fn codegen_units(&self) -> usize {
+    pub fn codegen_units(&self) -> CodegenUnits {
         if let Some(n) = self.opts.cli_forced_codegen_units {
-            return n;
+            return CodegenUnits::User(n);
         }
         if let Some(n) = self.target.default_codegen_units {
-            return n as usize;
+            return CodegenUnits::Default(n as usize);
         }
 
         // If incremental compilation is turned on, we default to a high number
         // codegen units in order to reduce the "collateral damage" small
         // changes cause.
         if self.opts.incremental.is_some() {
-            return 256;
+            return CodegenUnits::Default(256);
         }
 
         // Why is 16 codegen units the default all the time?
@@ -1251,7 +1292,7 @@ impl Session {
         // As a result 16 was chosen here! Mostly because it was a power of 2
         // and most benchmarks agreed it was roughly a local optimum. Not very
         // scientific.
-        16
+        CodegenUnits::Default(16)
     }
 
     pub fn teach(&self, code: &DiagnosticId) -> bool {
@@ -1341,6 +1382,7 @@ fn default_emitter(
 // JUSTIFICATION: literally session construction
 #[allow(rustc::bad_opt_access)]
 pub fn build_session(
+    handler: &EarlyErrorHandler,
     sopts: config::Options,
     io: CompilerIO,
     bundle: Option<Lrc<rustc_errors::FluentBundle>>,
@@ -1349,6 +1391,7 @@ pub fn build_session(
     driver_lint_caps: FxHashMap<lint::LintId, lint::Level>,
     file_loader: Option<Box<dyn FileLoader + Send + Sync + 'static>>,
     target_override: Option<Target>,
+    cfg_version: &'static str,
 ) -> Session {
     // FIXME: This is not general enough to make the warning lint completely override
     // normal diagnostic warnings, since the warning lint can also be denied and changed
@@ -1357,8 +1400,8 @@ pub fn build_session(
         .lint_opts
         .iter()
         .rfind(|&(key, _)| *key == "warnings")
-        .map_or(false, |&(_, level)| level == lint::Allow);
-    let cap_lints_allow = sopts.lint_cap.map_or(false, |cap| cap == lint::Allow);
+        .is_some_and(|&(_, level)| level == lint::Allow);
+    let cap_lints_allow = sopts.lint_cap.is_some_and(|cap| cap == lint::Allow);
     let can_emit_warnings = !(warnings_allow || cap_lints_allow);
 
     let sysroot = match &sopts.maybe_sysroot {
@@ -1366,13 +1409,12 @@ pub fn build_session(
         None => filesearch::get_or_default_sysroot().expect("Failed finding sysroot"),
     };
 
-    let target_cfg = config::build_target_config(&sopts, target_override, &sysroot);
+    let target_cfg = config::build_target_config(handler, &sopts, target_override, &sysroot);
     let host_triple = TargetTriple::from_triple(config::host_triple());
-    let (host, target_warnings) = Target::search(&host_triple, &sysroot).unwrap_or_else(|e| {
-        early_error(sopts.error_format, &format!("Error loading host specification: {e}"))
-    });
+    let (host, target_warnings) = Target::search(&host_triple, &sysroot)
+        .unwrap_or_else(|e| handler.early_error(format!("Error loading host specification: {e}")));
     for warning in target_warnings.warning_messages() {
-        early_warn(sopts.error_format, &warning)
+        handler.early_warn(warning)
     }
 
     let loader = file_loader.unwrap_or_else(|| Box::new(RealFileLoader));
@@ -1414,7 +1456,7 @@ pub fn build_session(
         match profiler {
             Ok(profiler) => Some(Arc::new(profiler)),
             Err(e) => {
-                early_warn(sopts.error_format, &format!("failed to create profiler: {e}"));
+                handler.early_warn(format!("failed to create profiler: {e}"));
                 None
             }
         }
@@ -1448,7 +1490,10 @@ pub fn build_session(
         CguReuseTracker::new_disabled()
     };
 
-    let prof = SelfProfilerRef::new(self_profiler, sopts.unstable_opts.time_passes);
+    let prof = SelfProfilerRef::new(
+        self_profiler,
+        sopts.unstable_opts.time_passes.then(|| sopts.unstable_opts.time_passes_format),
+    );
 
     let ctfe_backtrace = Lock::new(match env::var("RUSTC_CTFE_BACKTRACE") {
         Ok(ref val) if val == "immediate" => CtfeBacktrace::Immediate,
@@ -1488,8 +1533,9 @@ pub fn build_session(
         ctfe_backtrace,
         miri_unleashed_features: Lock::new(Default::default()),
         asm_arch,
-        target_features: FxHashSet::default(),
-        unstable_target_features: FxHashSet::default(),
+        target_features: Default::default(),
+        unstable_target_features: Default::default(),
+        cfg_version,
     };
 
     validate_commandline_args_with_session_available(&sess);
@@ -1568,22 +1614,58 @@ fn validate_commandline_args_with_session_available(sess: &Session) {
         sess.emit_err(errors::CannotEnableCrtStaticLinux);
     }
 
-    // LLVM CFI and VFE both require LTO.
-    if sess.lto() != config::Lto::Fat {
-        if sess.is_sanitizer_cfi_enabled() {
-            sess.emit_err(errors::SanitizerCfiEnabled);
-        }
-        if sess.opts.unstable_opts.virtual_function_elimination {
-            sess.emit_err(errors::UnstableVirtualFunctionElimination);
-        }
+    // LLVM CFI requires LTO.
+    if sess.is_sanitizer_cfi_enabled()
+        && !(sess.lto() == config::Lto::Fat
+            || sess.lto() == config::Lto::Thin
+            || sess.opts.cg.linker_plugin_lto.enabled())
+    {
+        sess.emit_err(errors::SanitizerCfiRequiresLto);
     }
 
-    // LLVM CFI and KCFI are mutually exclusive
+    // LLVM CFI is incompatible with LLVM KCFI.
     if sess.is_sanitizer_cfi_enabled() && sess.is_sanitizer_kcfi_enabled() {
         sess.emit_err(errors::CannotMixAndMatchSanitizers {
             first: "cfi".to_string(),
             second: "kcfi".to_string(),
         });
+    }
+
+    // Canonical jump tables requires CFI.
+    if sess.is_sanitizer_cfi_canonical_jump_tables_disabled() {
+        if !sess.is_sanitizer_cfi_enabled() {
+            sess.emit_err(errors::SanitizerCfiCanonicalJumpTablesRequiresCfi);
+        }
+    }
+
+    // LLVM CFI pointer generalization requires CFI or KCFI.
+    if sess.is_sanitizer_cfi_generalize_pointers_enabled() {
+        if !(sess.is_sanitizer_cfi_enabled() || sess.is_sanitizer_kcfi_enabled()) {
+            sess.emit_err(errors::SanitizerCfiGeneralizePointersRequiresCfi);
+        }
+    }
+
+    // LLVM CFI integer normalization requires CFI or KCFI.
+    if sess.is_sanitizer_cfi_normalize_integers_enabled() {
+        if !(sess.is_sanitizer_cfi_enabled() || sess.is_sanitizer_kcfi_enabled()) {
+            sess.emit_err(errors::SanitizerCfiNormalizeIntegersRequiresCfi);
+        }
+    }
+
+    // LTO unit splitting requires LTO.
+    if sess.is_split_lto_unit_enabled()
+        && !(sess.lto() == config::Lto::Fat
+            || sess.lto() == config::Lto::Thin
+            || sess.opts.cg.linker_plugin_lto.enabled())
+    {
+        sess.emit_err(errors::SplitLtoUnitRequiresLto);
+    }
+
+    // VFE requires LTO.
+    if sess.lto() != config::Lto::Fat {
+        if sess.opts.unstable_opts.virtual_function_elimination {
+            sess.emit_err(errors::UnstableVirtualFunctionElimination);
+        }
     }
 
     if sess.opts.unstable_opts.stack_protector != StackProtector::None {
@@ -1614,6 +1696,13 @@ fn validate_commandline_args_with_session_available(sess: &Session) {
     if sess.opts.unstable_opts.instrument_xray.is_some() && !sess.target.options.supports_xray {
         sess.emit_err(errors::InstrumentationNotSupported { us: "XRay".to_string() });
     }
+
+    if let Some(flavor) = sess.opts.cg.linker_flavor {
+        if let Some(compatible_list) = sess.target.linker_flavor.check_compatibility(flavor) {
+            let flavor = flavor.desc();
+            sess.emit_err(errors::IncompatibleLinkerFlavor { flavor, compatible_list });
+        }
+    }
 }
 
 /// Holds data on the current incremental compilation session, if there is one.
@@ -1634,7 +1723,64 @@ pub enum IncrCompSession {
     InvalidBecauseOfErrors { session_directory: PathBuf },
 }
 
-fn early_error_handler(output: config::ErrorOutputType) -> rustc_errors::Handler {
+/// A wrapper around an [`Handler`] that is used for early error emissions.
+pub struct EarlyErrorHandler {
+    handler: Handler,
+}
+
+impl EarlyErrorHandler {
+    pub fn new(output: ErrorOutputType) -> Self {
+        let emitter = mk_emitter(output);
+        Self { handler: rustc_errors::Handler::with_emitter(true, None, emitter) }
+    }
+
+    pub fn abort_if_errors(&self) {
+        self.handler.abort_if_errors()
+    }
+
+    /// Swap out the underlying handler once we acquire the user's preference on error emission
+    /// format. Any errors prior to that will cause an abort and all stashed diagnostics of the
+    /// previous handler will be emitted.
+    pub fn abort_if_error_and_set_error_format(&mut self, output: ErrorOutputType) {
+        self.handler.abort_if_errors();
+
+        let emitter = mk_emitter(output);
+        self.handler = Handler::with_emitter(true, None, emitter);
+    }
+
+    #[allow(rustc::untranslatable_diagnostic)]
+    #[allow(rustc::diagnostic_outside_of_impl)]
+    pub fn early_note(&self, msg: impl Into<DiagnosticMessage>) {
+        self.handler.struct_note_without_error(msg).emit()
+    }
+
+    #[allow(rustc::untranslatable_diagnostic)]
+    #[allow(rustc::diagnostic_outside_of_impl)]
+    pub fn early_help(&self, msg: impl Into<DiagnosticMessage>) {
+        self.handler.struct_help(msg).emit()
+    }
+
+    #[allow(rustc::untranslatable_diagnostic)]
+    #[allow(rustc::diagnostic_outside_of_impl)]
+    #[must_use = "ErrorGuaranteed must be returned from `run_compiler` in order to exit with a non-zero status code"]
+    pub fn early_error_no_abort(&self, msg: impl Into<DiagnosticMessage>) -> ErrorGuaranteed {
+        self.handler.struct_err(msg).emit()
+    }
+
+    #[allow(rustc::untranslatable_diagnostic)]
+    #[allow(rustc::diagnostic_outside_of_impl)]
+    pub fn early_error(&self, msg: impl Into<DiagnosticMessage>) -> ! {
+        self.handler.struct_fatal(msg).emit()
+    }
+
+    #[allow(rustc::untranslatable_diagnostic)]
+    #[allow(rustc::diagnostic_outside_of_impl)]
+    pub fn early_warn(&self, msg: impl Into<DiagnosticMessage>) {
+        self.handler.struct_warn(msg).emit()
+    }
+}
+
+fn mk_emitter(output: ErrorOutputType) -> Box<dyn Emitter + sync::Send + 'static> {
     // FIXME(#100717): early errors aren't translated at the moment, so this is fine, but it will
     // need to reference every crate that might emit an early error for translation to work.
     let fallback_bundle =
@@ -1666,23 +1812,5 @@ fn early_error_handler(output: config::ErrorOutputType) -> rustc_errors::Handler
             TerminalUrl::No,
         )),
     };
-    rustc_errors::Handler::with_emitter(true, None, emitter)
-}
-
-#[allow(rustc::untranslatable_diagnostic)]
-#[allow(rustc::diagnostic_outside_of_impl)]
-pub fn early_error_no_abort(output: config::ErrorOutputType, msg: &str) -> ErrorGuaranteed {
-    early_error_handler(output).struct_err(msg).emit()
-}
-
-#[allow(rustc::untranslatable_diagnostic)]
-#[allow(rustc::diagnostic_outside_of_impl)]
-pub fn early_error(output: config::ErrorOutputType, msg: &str) -> ! {
-    early_error_handler(output).struct_fatal(msg).emit()
-}
-
-#[allow(rustc::untranslatable_diagnostic)]
-#[allow(rustc::diagnostic_outside_of_impl)]
-pub fn early_warn(output: config::ErrorOutputType, msg: &str) {
-    early_error_handler(output).struct_warn(msg).emit()
+    emitter
 }

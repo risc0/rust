@@ -1,9 +1,10 @@
-// run-rustfix
+//@run-rustfix
 #![warn(clippy::all, clippy::redundant_pattern_matching)]
 #![allow(unused_must_use)]
 #![allow(
     clippy::match_like_matches_macro,
     clippy::needless_bool,
+    clippy::needless_if,
     clippy::uninlined_format_args
 )]
 

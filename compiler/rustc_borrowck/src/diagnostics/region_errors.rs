@@ -207,7 +207,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
             .regioncx
             .placeholders_contained_in(lower_bound)
             .map(|placeholder| {
-                if let Some(id) = placeholder.name.get_id()
+                if let Some(id) = placeholder.bound.kind.get_id()
                     && let Some(placeholder_id) = id.as_local()
                     && let gat_hir_id = hir.local_def_id_to_hir_id(placeholder_id)
                     && let Some(generics_impl) = hir.get_parent(gat_hir_id).generics()
@@ -508,7 +508,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                         let generic_arg = substs[param_index as usize];
                         let identity_substs =
                             InternalSubsts::identity_for_item(self.infcx.tcx, adt.did());
-                        let base_ty = self.infcx.tcx.mk_adt(*adt, identity_substs);
+                        let base_ty = Ty::new_adt(self.infcx.tcx, *adt, identity_substs);
                         let base_generic_arg = identity_substs[param_index as usize];
                         let adt_desc = adt.descr();
 
@@ -533,8 +533,8 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                     }
                     _ => panic!("Unexpected type {ty:?}"),
                 };
-                diag.note(&format!("requirement occurs because of {desc}",));
-                diag.note(&note);
+                diag.note(format!("requirement occurs because of {desc}",));
+                diag.note(note);
                 diag.help("see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance");
             }
         }
@@ -845,7 +845,7 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                 return;
             }
 
-            let Some((alias_tys, alias_span)) = self
+            let Some((alias_tys, alias_span, lt_addition_span)) = self
                 .infcx
                 .tcx
                 .return_type_impl_or_dyn_traits_with_type_alias(suitable_region.def_id) else { return; };
@@ -858,12 +858,22 @@ impl<'a, 'tcx> MirBorrowckCtxt<'a, 'tcx> {
                     ()
                 }
                 if let TyKind::TraitObject(_, lt, _) = alias_ty.kind {
-                    spans_suggs.push((lt.ident.span.shrink_to_hi(), " + 'a".to_string()));
+                    if lt.ident.name == kw::Empty {
+                        spans_suggs.push((lt.ident.span.shrink_to_hi(), " + 'a".to_string()));
+                    } else {
+                        spans_suggs.push((lt.ident.span, "'a".to_string()));
+                    }
                 }
             }
-            spans_suggs.push((alias_span.shrink_to_hi(), "<'a>".to_string()));
+
+            if let Some(lt_addition_span) = lt_addition_span {
+                spans_suggs.push((lt_addition_span, "'a, ".to_string()));
+            } else {
+                spans_suggs.push((alias_span.shrink_to_hi(), "<'a>".to_string()));
+            }
+
             diag.multipart_suggestion_verbose(
-                &format!(
+                format!(
                     "to declare that the trait object {captures}, you can add a lifetime parameter `'a` in the type alias"
                 ),
                 spans_suggs,

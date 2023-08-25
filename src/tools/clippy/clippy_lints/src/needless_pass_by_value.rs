@@ -7,18 +7,17 @@ use clippy_utils::ty::{
 use clippy_utils::{get_trait_def_id, is_self, paths};
 use if_chain::if_chain;
 use rustc_ast::ast::Attribute;
-use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::{Applicability, Diagnostic};
 use rustc_hir::intravisit::FnKind;
 use rustc_hir::{
     BindingAnnotation, Body, FnDecl, GenericArg, HirId, Impl, ItemKind, Mutability, Node, PatKind, QPath, TyKind,
 };
-use rustc_hir::{HirIdMap, HirIdSet, LangItem};
+use rustc_hir::{HirIdSet, LangItem};
 use rustc_hir_typeck::expr_use_visitor as euv;
 use rustc_infer::infer::TyCtxtInferExt;
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::mir::FakeReadCause;
-use rustc_middle::ty::{self, TypeVisitableExt};
+use rustc_middle::ty::{self, TypeVisitableExt, Ty};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::def_id::LocalDefId;
 use rustc_span::symbol::kw;
@@ -26,7 +25,6 @@ use rustc_span::{sym, Span};
 use rustc_target::spec::abi::Abi;
 use rustc_trait_selection::traits;
 use rustc_trait_selection::traits::misc::type_allowed_to_implement_copy;
-use std::borrow::Cow;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -122,14 +120,12 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByValue {
 
         let sized_trait = need!(cx.tcx.lang_items().sized_trait());
 
-        let preds = traits::elaborate_predicates(cx.tcx, cx.param_env.caller_bounds().iter())
+        let preds = traits::elaborate(cx.tcx, cx.param_env.caller_bounds().iter())
             .filter(|p| !p.is_global())
-            .filter_map(|obligation| {
+            .filter_map(|pred| {
                 // Note that we do not want to deal with qualified predicates here.
-                match obligation.predicate.kind().no_bound_vars() {
-                    Some(ty::PredicateKind::Clause(ty::Clause::Trait(pred))) if pred.def_id() != sized_trait => {
-                        Some(pred)
-                    },
+                match pred.kind().no_bound_vars() {
+                    Some(ty::ClauseKind::Trait(pred)) if pred.def_id() != sized_trait => Some(pred),
                     _ => None,
                 }
             })
@@ -137,11 +133,7 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByValue {
 
         // Collect moved variables and spans which will need dereferencings from the
         // function body.
-        let MovedVariablesCtxt {
-            moved_vars,
-            spans_need_deref,
-            ..
-        } = {
+        let MovedVariablesCtxt { moved_vars } = {
             let mut ctx = MovedVariablesCtxt::default();
             let infcx = cx.tcx.infer_ctxt().build();
             euv::ExprUseVisitor::new(&mut ctx, &infcx, fn_def_id, cx.param_env, cx.typeck_results()).consume_body(body);
@@ -176,7 +168,7 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByValue {
                 (
                     preds.iter().any(|t| cx.tcx.is_diagnostic_item(sym::Borrow, t.def_id())),
                     !preds.is_empty() && {
-                        let ty_empty_region = cx.tcx.mk_imm_ref(cx.tcx.lifetimes.re_erased, ty);
+                        let ty_empty_region = Ty::new_imm_ref(cx.tcx,cx.tcx.lifetimes.re_erased, ty);
                         preds.iter().all(|t| {
                             let ty_params = t.trait_ref.substs.iter().skip(1).collect::<Vec<_>>();
                             implements_trait(cx, ty_empty_region, t.def_id(), &ty_params)
@@ -212,7 +204,6 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByValue {
                             }
                         }
 
-                        let deref_span = spans_need_deref.get(&canonical_id);
                         if_chain! {
                             if is_type_diagnostic_item(cx, ty, sym::Vec);
                             if let Some(clone_spans) =
@@ -240,16 +231,14 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByValue {
                                         snippet_opt(cx, span)
                                             .map_or(
                                                 "change the call to".into(),
-                                                |x| Cow::from(format!("change `{x}` to")),
-                                            )
-                                            .as_ref(),
+                                                |x| format!("change `{x}` to"),
+                                            ),
                                         suggestion,
                                         Applicability::Unspecified,
                                     );
                                 }
 
                                 // cannot be destructured, no need for `*` suggestion
-                                assert!(deref_span.is_none());
                                 return;
                             }
                         }
@@ -270,31 +259,19 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByValue {
                                         snippet_opt(cx, span)
                                             .map_or(
                                                 "change the call to".into(),
-                                                |x| Cow::from(format!("change `{x}` to"))
-                                            )
-                                            .as_ref(),
+                                                |x| format!("change `{x}` to")
+                                            ),
                                         suggestion,
                                         Applicability::Unspecified,
                                     );
                                 }
 
-                                assert!(deref_span.is_none());
                                 return;
                             }
                         }
 
-                        let mut spans = vec![(input.span, format!("&{}", snippet(cx, input.span, "_")))];
+                        let spans = vec![(input.span, format!("&{}", snippet(cx, input.span, "_")))];
 
-                        // Suggests adding `*` to dereference the added reference.
-                        if let Some(deref_span) = deref_span {
-                            spans.extend(
-                                deref_span
-                                    .iter()
-                                    .copied()
-                                    .map(|span| (span, format!("*{}", snippet(cx, span, "<expr>")))),
-                            );
-                            spans.sort_by_key(|&(span, _)| span);
-                        }
                         multispan_sugg(diag, "consider taking a reference instead", spans);
                     };
 
@@ -323,9 +300,6 @@ fn requires_exact_signature(attrs: &[Attribute]) -> bool {
 #[derive(Default)]
 struct MovedVariablesCtxt {
     moved_vars: HirIdSet,
-    /// Spans which need to be prefixed with `*` for dereferencing the
-    /// suggested additional reference.
-    spans_need_deref: HirIdMap<FxHashSet<Span>>,
 }
 
 impl MovedVariablesCtxt {

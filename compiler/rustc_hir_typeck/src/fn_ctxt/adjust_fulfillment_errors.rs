@@ -3,10 +3,8 @@ use rustc_hir as hir;
 use rustc_hir::def::Res;
 use rustc_hir::def_id::DefId;
 use rustc_infer::traits::ObligationCauseCode;
-use rustc_middle::ty::{
-    self, DefIdTree, Ty, TyCtxt, TypeSuperVisitable, TypeVisitable, TypeVisitor,
-};
-use rustc_span::{self, Span};
+use rustc_middle::ty::{self, Ty, TyCtxt, TypeSuperVisitable, TypeVisitable, TypeVisitor};
+use rustc_span::{self, symbol::kw, Span};
 use rustc_trait_selection::traits;
 
 use std::ops::ControlFlow;
@@ -27,17 +25,26 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         let generics = self.tcx.generics_of(def_id);
         let predicate_substs = match unsubstituted_pred.kind().skip_binder() {
-            ty::PredicateKind::Clause(ty::Clause::Trait(pred)) => pred.trait_ref.substs,
-            ty::PredicateKind::Clause(ty::Clause::Projection(pred)) => pred.projection_ty.substs,
-            _ => ty::List::empty(),
+            ty::ClauseKind::Trait(pred) => pred.trait_ref.substs.to_vec(),
+            ty::ClauseKind::Projection(pred) => pred.projection_ty.substs.to_vec(),
+            ty::ClauseKind::ConstArgHasType(arg, ty) => {
+                vec![ty.into(), arg.into()]
+            }
+            ty::ClauseKind::ConstEvaluatable(e) => vec![e.into()],
+            _ => return false,
         };
 
-        let find_param_matching = |matches: &dyn Fn(&ty::ParamTy) -> bool| {
-            predicate_substs.types().find_map(|ty| {
-                ty.walk().find_map(|arg| {
+        let find_param_matching = |matches: &dyn Fn(ty::ParamTerm) -> bool| {
+            predicate_substs.iter().find_map(|arg| {
+                arg.walk().find_map(|arg| {
                     if let ty::GenericArgKind::Type(ty) = arg.unpack()
-                        && let ty::Param(param_ty) = ty.kind()
-                        && matches(param_ty)
+                        && let ty::Param(param_ty) = *ty.kind()
+                        && matches(ty::ParamTerm::Ty(param_ty))
+                    {
+                        Some(arg)
+                    } else if let ty::GenericArgKind::Const(ct) = arg.unpack()
+                        && let ty::ConstKind::Param(param_ct) = ct.kind()
+                        && matches(ty::ParamTerm::Const(param_ct))
                     {
                         Some(arg)
                     } else {
@@ -49,26 +56,27 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         // Prefer generics that are local to the fn item, since these are likely
         // to be the cause of the unsatisfied predicate.
-        let mut param_to_point_at = find_param_matching(&|param_ty| {
-            self.tcx.parent(generics.type_param(param_ty, self.tcx).def_id) == def_id
+        let mut param_to_point_at = find_param_matching(&|param_term| {
+            self.tcx.parent(generics.param_at(param_term.index(), self.tcx).def_id) == def_id
         });
         // Fall back to generic that isn't local to the fn item. This will come
         // from a trait or impl, for example.
-        let mut fallback_param_to_point_at = find_param_matching(&|param_ty| {
-            self.tcx.parent(generics.type_param(param_ty, self.tcx).def_id) != def_id
-                && param_ty.name != rustc_span::symbol::kw::SelfUpper
+        let mut fallback_param_to_point_at = find_param_matching(&|param_term| {
+            self.tcx.parent(generics.param_at(param_term.index(), self.tcx).def_id) != def_id
+                && !matches!(param_term, ty::ParamTerm::Ty(ty) if ty.name == kw::SelfUpper)
         });
         // Finally, the `Self` parameter is possibly the reason that the predicate
         // is unsatisfied. This is less likely to be true for methods, because
         // method probe means that we already kinda check that the predicates due
         // to the `Self` type are true.
-        let mut self_param_to_point_at =
-            find_param_matching(&|param_ty| param_ty.name == rustc_span::symbol::kw::SelfUpper);
+        let mut self_param_to_point_at = find_param_matching(
+            &|param_term| matches!(param_term, ty::ParamTerm::Ty(ty) if ty.name == kw::SelfUpper),
+        );
 
         // Finally, for ambiguity-related errors, we actually want to look
         // for a parameter that is the source of the inference type left
         // over in this predicate.
-        if let traits::FulfillmentErrorCode::CodeAmbiguity = error.code {
+        if let traits::FulfillmentErrorCode::CodeAmbiguity { .. } = error.code {
             fallback_param_to_point_at = None;
             self_param_to_point_at = None;
             param_to_point_at =
@@ -154,24 +162,20 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 {
                     for param in
                         [param_to_point_at, fallback_param_to_point_at, self_param_to_point_at]
+                            .into_iter()
+                            .flatten()
                     {
-                        if let Some(param) = param {
-                            let refined_expr = self.point_at_field_if_possible(
-                                def_id,
-                                param,
-                                variant_def_id,
-                                fields,
-                            );
+                        let refined_expr =
+                            self.point_at_field_if_possible(def_id, param, variant_def_id, fields);
 
-                            match refined_expr {
-                                None => {}
-                                Some((refined_expr, _)) => {
-                                    error.obligation.cause.span = refined_expr
-                                        .span
-                                        .find_ancestor_in_same_ctxt(error.obligation.cause.span)
-                                        .unwrap_or(refined_expr.span);
-                                    return true;
-                                }
+                        match refined_expr {
+                            None => {}
+                            Some((refined_expr, _)) => {
+                                error.obligation.cause.span = refined_expr
+                                    .span
+                                    .find_ancestor_in_same_ctxt(error.obligation.cause.span)
+                                    .unwrap_or(refined_expr.span);
+                                return true;
                             }
                         }
                     }
@@ -227,15 +231,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             .own_substs(ty::InternalSubsts::identity_for_item(self.tcx, def_id));
         let Some((index, _)) = own_substs
             .iter()
-            .filter(|arg| matches!(arg.unpack(), ty::GenericArgKind::Type(_)))
             .enumerate()
             .find(|(_, arg)| **arg == param_to_point_at) else { return false };
         let Some(arg) = segment
             .args()
             .args
-            .iter()
-            .filter(|arg| matches!(arg, hir::GenericArg::Type(_)))
-            .nth(index) else { return false; };
+            .get(index) else { return false; };
         error.obligation.cause.span = arg
             .span()
             .find_ancestor_in_same_ctxt(error.obligation.cause.span)
@@ -253,7 +254,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             type BreakTy = ty::GenericArg<'tcx>;
             fn visit_ty(&mut self, ty: Ty<'tcx>) -> std::ops::ControlFlow<Self::BreakTy> {
                 if let Some(origin) = self.0.type_var_origin(ty)
-                    && let rustc_infer::infer::type_variable::TypeVariableOriginKind::TypeParameterDefinition(_, Some(def_id)) =
+                    && let rustc_infer::infer::type_variable::TypeVariableOriginKind::TypeParameterDefinition(_, def_id) =
                         origin.kind
                     && let generics = self.0.tcx.generics_of(self.1)
                     && let Some(index) = generics.param_def_id_to_index(self.0.tcx, def_id)
@@ -275,9 +276,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         span: Span,
     ) -> bool {
         if let traits::FulfillmentErrorCode::CodeSelectionError(
-            traits::SelectionError::OutputTypeParameterMismatch(_, expected, _),
+            traits::SelectionError::OutputTypeParameterMismatch(box traits::SelectionOutputTypeParameterMismatch{
+                expected_trait_ref, ..
+            }),
         ) = error.code
-            && let ty::Closure(def_id, _) | ty::Generator(def_id, ..) = expected.skip_binder().self_ty().kind()
+            && let ty::Closure(def_id, _) | ty::Generator(def_id, ..) = expected_trait_ref.skip_binder().self_ty().kind()
             && span.overlaps(self.tcx.def_span(*def_id))
         {
             true
@@ -302,7 +305,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             .iter()
             .filter(|field| {
                 let field_ty = field.ty(self.tcx, identity_substs);
-                Self::find_param_in_ty(field_ty.into(), param_to_point_at)
+                find_param_in_ty(field_ty.into(), param_to_point_at)
             })
             .collect();
 
@@ -327,7 +330,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     /// expression mentioned.
     ///
     /// `blame_specific_arg_if_possible` will find the most-specific expression anywhere inside
-    /// the provided function call expression, and mark it as responsible for the fullfillment
+    /// the provided function call expression, and mark it as responsible for the fulfillment
     /// error.
     fn blame_specific_arg_if_possible(
         &self,
@@ -348,7 +351,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             .inputs()
             .iter()
             .enumerate()
-            .filter(|(_, ty)| Self::find_param_in_ty((**ty).into(), param_to_point_at))
+            .filter(|(_, ty)| find_param_in_ty((**ty).into(), param_to_point_at))
             .collect();
         // If there's one field that references the given generic, great!
         if let [(idx, _)] = args_referencing_param.as_slice()
@@ -459,7 +462,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     /// obligation. Hence we refine the `expr` "outwards-in" and bail at the first kind of expression/impl we don't recognize.
     ///
     /// This function returns a `Result<&Expr, &Expr>` - either way, it returns the `Expr` whose span should be
-    /// reported as an error. If it is `Ok`, then it means it refined successfull. If it is `Err`, then it may be
+    /// reported as an error. If it is `Ok`, then it means it refined successful. If it is `Err`, then it may be
     /// only a partial success - but it cannot be refined even further.
     fn blame_specific_expr_if_possible_for_derived_predicate_obligation(
         &self,
@@ -478,7 +481,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // For the purposes of this function, we hope that it is a `struct` type, and that our current `expr` is a literal of
         // that struct type.
         let impl_trait_self_ref = if self.tcx.is_trait_alias(obligation.impl_or_alias_def_id) {
-            self.tcx.mk_trait_ref(
+            ty::TraitRef::new(
+                self.tcx,
                 obligation.impl_or_alias_def_id,
                 ty::InternalSubsts::identity_for_item(self.tcx, obligation.impl_or_alias_def_id),
             )
@@ -504,11 +508,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // This shouldn't happen, but since this is only a diagnostic improvement, avoid breaking things.
             return Err(expr);
         }
-        let relevant_broken_predicate: ty::PredicateKind<'tcx> =
-            impl_predicates.predicates[impl_predicate_index].0.kind().skip_binder();
 
-        match relevant_broken_predicate {
-            ty::PredicateKind::Clause(ty::Clause::Trait(broken_trait)) => {
+        match impl_predicates.predicates[impl_predicate_index].0.kind().skip_binder() {
+            ty::ClauseKind::Trait(broken_trait) => {
                 // ...
                 self.blame_specific_part_of_expr_corresponding_to_generic_param(
                     broken_trait.trait_ref.self_ty().into(),
@@ -527,7 +529,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     /// - in_ty: `(Option<Vec<T>, bool)`
     /// we would drill until we arrive at `vec![1, 2, 3]`.
     ///
-    /// If successful, we return `Ok(refined_expr)`. If unsuccesful, we return `Err(partially_refined_expr`),
+    /// If successful, we return `Ok(refined_expr)`. If unsuccessful, we return `Err(partially_refined_expr`),
     /// which will go as far as possible. For example, given `(foo(), false)` instead, we would drill to
     /// `foo()` and then return `Err("foo()")`.
     ///
@@ -571,8 +573,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // Find out which of `in_ty_elements` refer to `param`.
             // FIXME: It may be better to take the first if there are multiple,
             // just so that the error points to a smaller expression.
-            let Some((drill_expr, drill_ty)) = Self::is_iterator_singleton(expr_elements.iter().zip( in_ty_elements.iter()).filter(|(_expr_elem, in_ty_elem)| {
-                Self::find_param_in_ty((*in_ty_elem).into(), param)
+            let Some((drill_expr, drill_ty)) = is_iterator_singleton(expr_elements.iter().zip( in_ty_elements.iter()).filter(|(_expr_elem, in_ty_elem)| {
+                find_param_in_ty((*in_ty_elem).into(), param)
             })) else {
                 // The param is not mentioned, or it is mentioned in multiple indexes.
                 return Err(expr);
@@ -620,10 +622,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // We need to know which of the generic parameters mentions our target param.
             // We expect that at least one of them does, since it is expected to be mentioned.
             let Some((drill_generic_index, generic_argument_type)) =
-                Self::is_iterator_singleton(
+                is_iterator_singleton(
                     in_ty_adt_generic_args.iter().enumerate().filter(
                         |(_index, in_ty_generic)| {
-                            Self::find_param_in_ty(*in_ty_generic, param)
+                            find_param_in_ty(*in_ty_generic, param)
                         },
                     ),
                 ) else {
@@ -743,10 +745,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // We need to know which of the generic parameters mentions our target param.
             // We expect that at least one of them does, since it is expected to be mentioned.
             let Some((drill_generic_index, generic_argument_type)) =
-                Self::is_iterator_singleton(
+                is_iterator_singleton(
                     in_ty_adt_generic_args.iter().enumerate().filter(
                         |(_index, in_ty_generic)| {
-                            Self::find_param_in_ty(*in_ty_generic, param)
+                            find_param_in_ty(*in_ty_generic, param)
                         },
                     ),
                 ) else {
@@ -785,14 +787,14 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             //     outer contextual information.
 
             // (1) Find the (unique) field index which mentions the type in our constraint:
-            let Some((field_index, field_type)) = Self::is_iterator_singleton(
+            let Some((field_index, field_type)) = is_iterator_singleton(
                 in_ty_adt
                     .variant_with_id(variant_def_id)
                     .fields
                     .iter()
                     .map(|field| field.ty(self.tcx, *in_ty_adt_generic_args))
                     .enumerate()
-                    .filter(|(_index, field_type)| Self::find_param_in_ty((*field_type).into(), param))
+                    .filter(|(_index, field_type)| find_param_in_ty((*field_type).into(), param))
             ) else {
                 return Err(expr);
             };
@@ -825,21 +827,21 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         Err(expr)
     }
+}
 
-    // FIXME: This can be made into a private, non-impl function later.
-    /// Traverses the given ty (either a `ty::Ty` or a `ty::GenericArg`) and searches for references
-    /// to the given `param_to_point_at`. Returns `true` if it finds any use of the param.
-    pub fn find_param_in_ty(
-        ty: ty::GenericArg<'tcx>,
-        param_to_point_at: ty::GenericArg<'tcx>,
-    ) -> bool {
-        let mut walk = ty.walk();
-        while let Some(arg) = walk.next() {
-            if arg == param_to_point_at {
-                return true;
-            }
-            if let ty::GenericArgKind::Type(ty) = arg.unpack()
-                && let ty::Alias(ty::Projection, ..) = ty.kind()
+/// Traverses the given ty (either a `ty::Ty` or a `ty::GenericArg`) and searches for references
+/// to the given `param_to_point_at`. Returns `true` if it finds any use of the param.
+fn find_param_in_ty<'tcx>(
+    ty: ty::GenericArg<'tcx>,
+    param_to_point_at: ty::GenericArg<'tcx>,
+) -> bool {
+    let mut walk = ty.walk();
+    while let Some(arg) = walk.next() {
+        if arg == param_to_point_at {
+            return true;
+        }
+        if let ty::GenericArgKind::Type(ty) = arg.unpack()
+                && let ty::Alias(ty::Projection | ty::Inherent, ..) = ty.kind()
             {
                 // This logic may seem a bit strange, but typically when
                 // we have a projection type in a function signature, the
@@ -849,16 +851,14 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 // in some UI tests.
                 walk.skip_current_subtree();
             }
-        }
-        false
     }
+    false
+}
 
-    // FIXME: This can be made into a private, non-impl function later.
-    /// Returns `Some(iterator.next())` if it has exactly one item, and `None` otherwise.
-    pub fn is_iterator_singleton<T>(mut iterator: impl Iterator<Item = T>) -> Option<T> {
-        match (iterator.next(), iterator.next()) {
-            (_, Some(_)) => None,
-            (first, _) => first,
-        }
+/// Returns `Some(iterator.next())` if it has exactly one item, and `None` otherwise.
+fn is_iterator_singleton<T>(mut iterator: impl Iterator<Item = T>) -> Option<T> {
+    match (iterator.next(), iterator.next()) {
+        (_, Some(_)) => None,
+        (first, _) => first,
     }
 }

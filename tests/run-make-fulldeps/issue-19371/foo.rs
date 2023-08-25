@@ -6,7 +6,7 @@ extern crate rustc_session;
 extern crate rustc_span;
 
 use rustc_interface::interface;
-use rustc_session::config::{Input, Options, OutputType, OutputTypes};
+use rustc_session::config::{Input, Options, OutFileName, OutputType, OutputTypes};
 use rustc_span::source_map::FileName;
 
 use std::path::PathBuf;
@@ -50,7 +50,7 @@ fn compile(code: String, output: PathBuf, sysroot: PathBuf) {
         crate_cfg: Default::default(),
         crate_check_cfg: Default::default(),
         input,
-        output_file: Some(output),
+        output_file: Some(OutFileName::Real(output)),
         output_dir: None,
         file_loader: None,
         locale_resources: &[],
@@ -63,10 +63,11 @@ fn compile(code: String, output: PathBuf, sysroot: PathBuf) {
     };
 
     interface::run_compiler(config, |compiler| {
-        // This runs all the passes prior to linking, too.
-        let linker = compiler.enter(|queries| queries.linker());
-        if let Ok(linker) = linker {
-            linker.link();
-        }
+        let linker = compiler.enter(|queries| {
+            queries.global_ctxt()?.enter(|tcx| tcx.analysis(()))?;
+            let ongoing_codegen = queries.ongoing_codegen()?;
+            queries.linker(ongoing_codegen)
+        });
+        linker.unwrap().link();
     });
 }

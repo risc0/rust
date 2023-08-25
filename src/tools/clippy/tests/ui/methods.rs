@@ -1,4 +1,4 @@
-// aux-build:option_helpers.rs
+//@aux-build:option_helpers.rs
 
 #![warn(clippy::all, clippy::pedantic)]
 #![allow(
@@ -18,6 +18,7 @@
     clippy::wrong_self_convention,
     clippy::unused_async,
     clippy::unused_self,
+    clippy::useless_vec,
     unused
 )]
 

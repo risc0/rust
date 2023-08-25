@@ -112,6 +112,19 @@ export function isRustEditor(editor: vscode.TextEditor): editor is RustEditor {
     return isRustDocument(editor.document);
 }
 
+export function isDocumentInWorkspace(document: RustDocument): boolean {
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (!workspaceFolders) {
+        return false;
+    }
+    for (const folder of workspaceFolders) {
+        if (document.uri.fsPath.startsWith(folder.uri.fsPath)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 export function isValidExecutable(path: string): boolean {
     log.debug("Checking availability of a binary at", path);
 
@@ -150,15 +163,32 @@ export function memoizeAsync<Ret, TThis, Param extends string>(
 
 /** Awaitable wrapper around `child_process.exec` */
 export function execute(command: string, options: ExecOptions): Promise<string> {
+    log.info(`running command: ${command}`);
     return new Promise((resolve, reject) => {
         exec(command, options, (err, stdout, stderr) => {
             if (err) {
+                log.error(err);
                 reject(err);
                 return;
             }
 
             if (stderr) {
                 reject(new Error(stderr));
+                return;
+            }
+
+            resolve(stdout.trimEnd());
+        });
+    });
+}
+
+export function executeDiscoverProject(command: string, options: ExecOptions): Promise<string> {
+    log.info(`running command: ${command}`);
+    return new Promise((resolve, reject) => {
+        exec(command, options, (err, stdout, _) => {
+            if (err) {
+                log.error(err);
+                reject(err);
                 return;
             }
 

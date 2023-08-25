@@ -2,6 +2,7 @@
 
 use crate::builder::Builder;
 use crate::util::{output, program_out_of_date, t};
+use build_helper::ci::CiEnv;
 use build_helper::git::get_git_modified_files;
 use ignore::WalkBuilder;
 use std::collections::VecDeque;
@@ -39,7 +40,7 @@ fn rustfmt(src: &Path, rustfmt: &Path, paths: &[PathBuf], check: bool) -> impl F
                         code, run `./x.py fmt` instead.",
                 cmd_debug,
             );
-            crate::detail_exit(1);
+            crate::detail_exit_macro!(1);
         }
         true
     }
@@ -156,11 +157,20 @@ pub fn format(build: &Builder<'_>, check: bool, paths: &[PathBuf]) {
                 // preventing the latter from being formatted.
                 ignore_fmt.add(&format!("!/{}", untracked_path)).expect(&untracked_path);
             }
-            if !check && paths.is_empty() {
+            // Only check modified files locally to speed up runtime.
+            // We still check all files in CI to avoid bugs in `get_modified_rs_files` letting regressions slip through;
+            // we also care about CI time less since this is still very fast compared to building the compiler.
+            if !CiEnv::is_ci() && paths.is_empty() {
                 match get_modified_rs_files(build) {
                     Ok(Some(files)) => {
+                        if files.len() <= 10 {
+                            for file in &files {
+                                println!("formatting modified file {file}");
+                            }
+                        } else {
+                            println!("formatting {} modified files", files.len());
+                        }
                         for file in files {
-                            println!("formatting modified file {file}");
                             ignore_fmt.add(&format!("/{file}")).expect(&file);
                         }
                     }
@@ -186,7 +196,7 @@ pub fn format(build: &Builder<'_>, check: bool, paths: &[PathBuf]) {
 
     let rustfmt_path = build.initial_rustfmt().unwrap_or_else(|| {
         eprintln!("./x.py fmt is not supported on this channel");
-        crate::detail_exit(1);
+        crate::detail_exit_macro!(1);
     });
     assert!(rustfmt_path.exists(), "{}", rustfmt_path.display());
     let src = build.src.clone();

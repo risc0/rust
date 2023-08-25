@@ -19,6 +19,8 @@ use tracing::debug;
 
 use std::{iter, mem};
 
+use crate::errors;
+
 #[derive(Clone)]
 struct Test {
     span: Span,
@@ -37,7 +39,7 @@ struct TestCtxt<'a> {
 
 /// Traverse the crate, collecting all the test functions, eliding any
 /// existing main functions, and synthesizing a main test harness
-pub fn inject(sess: &Session, resolver: &mut dyn ResolverExpand, krate: &mut ast::Crate) {
+pub fn inject(krate: &mut ast::Crate, sess: &Session, resolver: &mut dyn ResolverExpand) {
     let span_diagnostic = sess.diagnostic();
     let panic_strategy = sess.panic_strategy();
     let platform_panic_strategy = sess.target.panic_strategy;
@@ -47,13 +49,13 @@ pub fn inject(sess: &Session, resolver: &mut dyn ResolverExpand, krate: &mut ast
     // unconditional, so that the attribute is still marked as used in
     // non-test builds.
     let reexport_test_harness_main =
-        sess.first_attr_value_str_by_name(&krate.attrs, sym::reexport_test_harness_main);
+        attr::first_attr_value_str_by_name(&krate.attrs, sym::reexport_test_harness_main);
 
     // Do this here so that the test_runner crate attribute gets marked as used
     // even in non-test builds
-    let test_runner = get_test_runner(sess, span_diagnostic, &krate);
+    let test_runner = get_test_runner(span_diagnostic, &krate);
 
-    if sess.opts.test {
+    if sess.is_test_crate() {
         let panic_strategy = match (panic_strategy, sess.opts.unstable_opts.panic_abort_tests) {
             (PanicStrategy::Abort, true) => PanicStrategy::Abort,
             (PanicStrategy::Abort, false) => {
@@ -61,10 +63,7 @@ pub fn inject(sess: &Session, resolver: &mut dyn ResolverExpand, krate: &mut ast
                     // Silently allow compiling with panic=abort on these platforms,
                     // but with old behavior (abort if a test fails).
                 } else {
-                    span_diagnostic.err(
-                        "building tests with panic=abort is not supported \
-                                         without `-Zpanic_abort_tests`",
-                    );
+                    span_diagnostic.emit_err(errors::TestsNotSupport {});
                 }
                 PanicStrategy::Unwind
             }
@@ -123,7 +122,7 @@ impl<'a> MutVisitor for TestHarnessGenerator<'a> {
 
     fn flat_map_item(&mut self, i: P<ast::Item>) -> SmallVec<[P<ast::Item>; 1]> {
         let mut item = i.into_inner();
-        if let Some(name) = get_test_name(&self.cx.ext_cx.sess, &item) {
+        if let Some(name) = get_test_name(&item) {
             debug!("this is a test item");
 
             let test = Test { span: item.span, ident: item.ident, name };
@@ -145,12 +144,12 @@ impl<'a> MutVisitor for TestHarnessGenerator<'a> {
 
 // Beware, this is duplicated in librustc_passes/entry.rs (with
 // `rustc_hir::Item`), so make sure to keep them in sync.
-fn entry_point_type(sess: &Session, item: &ast::Item, depth: usize) -> EntryPointType {
+fn entry_point_type(item: &ast::Item, depth: usize) -> EntryPointType {
     match item.kind {
         ast::ItemKind::Fn(..) => {
-            if sess.contains_name(&item.attrs, sym::start) {
+            if attr::contains_name(&item.attrs, sym::start) {
                 EntryPointType::Start
-            } else if sess.contains_name(&item.attrs, sym::rustc_main) {
+            } else if attr::contains_name(&item.attrs, sym::rustc_main) {
                 EntryPointType::RustcMainAttr
             } else if item.ident.name == sym::main {
                 if depth == 0 {
@@ -184,7 +183,7 @@ impl<'a> MutVisitor for EntryPointCleaner<'a> {
         // Remove any #[rustc_main] or #[start] from the AST so it doesn't
         // clash with the one we're going to add, but mark it as
         // #[allow(dead_code)] to avoid printing warnings.
-        let item = match entry_point_type(self.sess, &item, self.depth) {
+        let item = match entry_point_type(&item, self.depth) {
             EntryPointType::MainNamed | EntryPointType::RustcMainAttr | EntryPointType::Start => {
                 item.map(|ast::Item { id, ident, attrs, kind, vis, span, tokens }| {
                     let allow_dead_code = attr::mk_attr_nested_word(
@@ -230,7 +229,7 @@ fn generate_test_harness(
     let expn_id = ext_cx.resolver.expansion_for_ast_pass(
         DUMMY_SP,
         AstPass::TestHarness,
-        &[sym::test, sym::rustc_attrs],
+        &[sym::test, sym::rustc_attrs, sym::no_coverage],
         None,
     );
     let def_site = DUMMY_SP.with_def_site_ctxt(expn_id.to_expn_id());
@@ -311,6 +310,8 @@ fn mk_main(cx: &mut TestCtxt<'_>) -> P<ast::Item> {
 
     // #[rustc_main]
     let main_attr = ecx.attr_word(sym::rustc_main, sp);
+    // #[no_coverage]
+    let no_coverage_attr = ecx.attr_word(sym::no_coverage, sp);
 
     // pub fn main() { ... }
     let main_ret_ty = ecx.ty(sp, ast::TyKind::Tup(ThinVec::new()));
@@ -340,7 +341,7 @@ fn mk_main(cx: &mut TestCtxt<'_>) -> P<ast::Item> {
 
     let main = P(ast::Item {
         ident: main_id,
-        attrs: thin_vec![main_attr],
+        attrs: thin_vec![main_attr, no_coverage_attr],
         id: ast::DUMMY_NODE_ID,
         kind: main,
         vis: ast::Visibility { span: sp, kind: ast::VisibilityKind::Public, tokens: None },
@@ -373,27 +374,23 @@ fn mk_tests_slice(cx: &TestCtxt<'_>, sp: Span) -> P<ast::Expr> {
     )
 }
 
-fn get_test_name(sess: &Session, i: &ast::Item) -> Option<Symbol> {
-    sess.first_attr_value_str_by_name(&i.attrs, sym::rustc_test_marker)
+fn get_test_name(i: &ast::Item) -> Option<Symbol> {
+    attr::first_attr_value_str_by_name(&i.attrs, sym::rustc_test_marker)
 }
 
-fn get_test_runner(
-    sess: &Session,
-    sd: &rustc_errors::Handler,
-    krate: &ast::Crate,
-) -> Option<ast::Path> {
-    let test_attr = sess.find_by_name(&krate.attrs, sym::test_runner)?;
+fn get_test_runner(sd: &rustc_errors::Handler, krate: &ast::Crate) -> Option<ast::Path> {
+    let test_attr = attr::find_by_name(&krate.attrs, sym::test_runner)?;
     let meta_list = test_attr.meta_item_list()?;
     let span = test_attr.span;
     match &*meta_list {
         [single] => match single.meta_item() {
             Some(meta_item) if meta_item.is_word() => return Some(meta_item.path.clone()),
             _ => {
-                sd.struct_span_err(span, "`test_runner` argument must be a path").emit();
+                sd.emit_err(errors::TestRunnerInvalid { span });
             }
         },
         _ => {
-            sd.struct_span_err(span, "`#![test_runner(..)]` accepts exactly 1 argument").emit();
+            sd.emit_err(errors::TestRunnerNargs { span });
         }
     }
     None

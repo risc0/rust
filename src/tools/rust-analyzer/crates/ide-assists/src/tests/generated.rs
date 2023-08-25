@@ -439,7 +439,7 @@ fn doctest_convert_match_to_let_else() {
         r#####"
 //- minicore: option
 fn foo(opt: Option<()>) {
-    let val = $0match opt {
+    let val$0 = match opt {
         Some(it) => it,
         None => return,
     };
@@ -489,6 +489,31 @@ impl Point {
     pub fn y(&self) -> f32 {
         self.1
     }
+}
+"#####,
+    )
+}
+
+#[test]
+fn doctest_convert_nested_function_to_closure() {
+    check_doc_test(
+        "convert_nested_function_to_closure",
+        r#####"
+fn main() {
+    fn fo$0o(label: &str, number: u64) {
+        println!("{}: {}", label, number);
+    }
+
+    foo("Bar", 100);
+}
+"#####,
+        r#####"
+fn main() {
+    let foo = |label: &str, number: u64| {
+        println!("{}: {}", label, number);
+    };
+
+    foo("Bar", 100);
 }
 "#####,
     )
@@ -1455,6 +1480,27 @@ fn foo(name: Option<&str>) {
 }
 
 #[test]
+fn doctest_inline_const_as_literal() {
+    check_doc_test(
+        "inline_const_as_literal",
+        r#####"
+const STRING: &str = "Hello, World!";
+
+fn something() -> &'static str {
+    STRING$0
+}
+"#####,
+        r#####"
+const STRING: &str = "Hello, World!";
+
+fn something() -> &'static str {
+    "Hello, World!"
+}
+"#####,
+    )
+}
+
+#[test]
 fn doctest_inline_into_callers() {
     check_doc_test(
         "inline_into_callers",
@@ -1596,7 +1642,7 @@ fn doctest_introduce_named_generic() {
 fn foo(bar: $0impl Bar) {}
 "#####,
         r#####"
-fn foo<B: Bar>(bar: B) {}
+fn foo<$0B: Bar>(bar: B) {}
 "#####,
     )
 }
@@ -2006,12 +2052,12 @@ fn doctest_remove_dbg() {
         "remove_dbg",
         r#####"
 fn main() {
-    $0dbg!(92);
+    let x = $0dbg!(42 * dbg!(4 + 2));$0
 }
 "#####,
         r#####"
 fn main() {
-    92;
+    let x = 42 * (4 + 2);
 }
 "#####,
     )
@@ -2116,7 +2162,7 @@ trait Foo {
 }
 
 struct Bar;
-$0impl Foo for Bar {
+$0impl Foo for Bar$0 {
     const B: u8 = 17;
     fn c() {}
     type A = String;
@@ -2314,41 +2360,14 @@ fn handle(action: Action) {
 }
 
 #[test]
-fn doctest_replace_or_else_with_or() {
+fn doctest_replace_named_generic_with_impl() {
     check_doc_test(
-        "replace_or_else_with_or",
+        "replace_named_generic_with_impl",
         r#####"
-//- minicore:option
-fn foo() {
-    let a = Some(1);
-    a.unwra$0p_or_else(|| 2);
-}
+fn new<P$0: AsRef<Path>>(location: P) -> Self {}
 "#####,
         r#####"
-fn foo() {
-    let a = Some(1);
-    a.unwrap_or(2);
-}
-"#####,
-    )
-}
-
-#[test]
-fn doctest_replace_or_with_or_else() {
-    check_doc_test(
-        "replace_or_with_or_else",
-        r#####"
-//- minicore:option
-fn foo() {
-    let a = Some(1);
-    a.unwra$0p_or(2);
-}
-"#####,
-        r#####"
-fn foo() {
-    let a = Some(1);
-    a.unwrap_or_else(|| 2);
-}
+fn new(location: impl AsRef<Path>) -> Self {}
 "#####,
     )
 }
@@ -2392,7 +2411,7 @@ fn doctest_replace_try_expr_with_match() {
     check_doc_test(
         "replace_try_expr_with_match",
         r#####"
-//- minicore:option
+//- minicore: try, option
 fn handle() {
     let pat = Some(true)$0?;
 }
@@ -2422,6 +2441,46 @@ fn main() {
 fn make<T>() -> T { ) }
 fn main() {
     let a: i32 = make();
+}
+"#####,
+    )
+}
+
+#[test]
+fn doctest_replace_with_eager_method() {
+    check_doc_test(
+        "replace_with_eager_method",
+        r#####"
+//- minicore:option, fn
+fn foo() {
+    let a = Some(1);
+    a.unwra$0p_or_else(|| 2);
+}
+"#####,
+        r#####"
+fn foo() {
+    let a = Some(1);
+    a.unwrap_or(2);
+}
+"#####,
+    )
+}
+
+#[test]
+fn doctest_replace_with_lazy_method() {
+    check_doc_test(
+        "replace_with_lazy_method",
+        r#####"
+//- minicore:option, fn
+fn foo() {
+    let a = Some(1);
+    a.unwra$0p_or(2);
+}
+"#####,
+        r#####"
+fn foo() {
+    let a = Some(1);
+    a.unwrap_or_else(|| 2);
 }
 "#####,
     )

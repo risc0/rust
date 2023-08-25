@@ -147,8 +147,7 @@ pub struct AtomicBool {
 
 #[cfg(target_has_atomic_load_store = "8")]
 #[stable(feature = "rust1", since = "1.0.0")]
-#[rustc_const_unstable(feature = "const_default_impls", issue = "87864")]
-impl const Default for AtomicBool {
+impl Default for AtomicBool {
     /// Creates an `AtomicBool` initialized to `false`.
     #[inline]
     fn default() -> Self {
@@ -179,8 +178,7 @@ pub struct AtomicPtr<T> {
 
 #[cfg(target_has_atomic_load_store = "ptr")]
 #[stable(feature = "rust1", since = "1.0.0")]
-#[rustc_const_unstable(feature = "const_default_impls", issue = "87864")]
-impl<T> const Default for AtomicPtr<T> {
+impl<T> Default for AtomicPtr<T> {
     /// Creates a null `AtomicPtr<T>`.
     fn default() -> AtomicPtr<T> {
         AtomicPtr::new(crate::ptr::null_mut())
@@ -960,6 +958,7 @@ impl AtomicBool {
     /// ```ignore (extern-declaration)
     /// # fn main() {
     /// use std::sync::atomic::AtomicBool;
+    ///
     /// extern "C" {
     ///     fn my_atomic_op(arg: *mut bool);
     /// }
@@ -971,7 +970,8 @@ impl AtomicBool {
     /// # }
     /// ```
     #[inline]
-    #[unstable(feature = "atomic_mut_ptr", reason = "recently added", issue = "66893")]
+    #[stable(feature = "atomic_as_ptr", since = "1.70.0")]
+    #[rustc_const_stable(feature = "atomic_as_ptr", since = "1.70.0")]
     pub const fn as_ptr(&self) -> *mut bool {
         self.v.get().cast()
     }
@@ -1890,7 +1890,6 @@ impl<T> AtomicPtr<T> {
     /// # Examples
     ///
     /// ```ignore (extern-declaration)
-    /// #![feature(atomic_mut_ptr)]
     /// use std::sync::atomic::AtomicPtr;
     ///
     /// extern "C" {
@@ -1906,7 +1905,8 @@ impl<T> AtomicPtr<T> {
     /// }
     /// ```
     #[inline]
-    #[unstable(feature = "atomic_mut_ptr", reason = "recently added", issue = "66893")]
+    #[stable(feature = "atomic_as_ptr", since = "1.70.0")]
+    #[rustc_const_stable(feature = "atomic_as_ptr", since = "1.70.0")]
     pub const fn as_ptr(&self) -> *mut *mut T {
         self.p.get()
     }
@@ -1914,8 +1914,7 @@ impl<T> AtomicPtr<T> {
 
 #[cfg(target_has_atomic_load_store = "8")]
 #[stable(feature = "atomic_bool_from", since = "1.24.0")]
-#[rustc_const_unstable(feature = "const_convert", issue = "88674")]
-impl const From<bool> for AtomicBool {
+impl From<bool> for AtomicBool {
     /// Converts a `bool` into an `AtomicBool`.
     ///
     /// # Examples
@@ -1933,8 +1932,7 @@ impl const From<bool> for AtomicBool {
 
 #[cfg(target_has_atomic_load_store = "ptr")]
 #[stable(feature = "atomic_from", since = "1.23.0")]
-#[rustc_const_unstable(feature = "const_convert", issue = "88674")]
-impl<T> const From<*mut T> for AtomicPtr<T> {
+impl<T> From<*mut T> for AtomicPtr<T> {
     /// Converts a `*mut T` into an `AtomicPtr<T>`.
     #[inline]
     fn from(p: *mut T) -> Self {
@@ -1949,8 +1947,7 @@ macro_rules! if_not_8_bit {
     ($_:ident, $($tt:tt)*) => { $($tt)* };
 }
 
-#[cfg_attr(not(bootstrap), cfg(target_has_atomic_load_store))]
-#[cfg_attr(bootstrap, cfg(target_has_atomic_load_store = "8"))]
+#[cfg(target_has_atomic_load_store)]
 macro_rules! atomic_int {
     ($cfg_cas:meta,
      $cfg_align:meta,
@@ -2001,8 +1998,7 @@ macro_rules! atomic_int {
         pub const $atomic_init: $atomic_type = $atomic_type::new(0);
 
         #[$stable]
-        #[rustc_const_unstable(feature = "const_default_impls", issue = "87864")]
-        impl const Default for $atomic_type {
+        impl Default for $atomic_type {
             #[inline]
             fn default() -> Self {
                 Self::new(Default::default())
@@ -2010,8 +2006,7 @@ macro_rules! atomic_int {
         }
 
         #[$stable_from]
-        #[rustc_const_unstable(feature = "const_num_from_num", issue = "87852")]
-        impl const From<$int_type> for $atomic_type {
+        impl From<$int_type> for $atomic_type {
             #[doc = concat!("Converts an `", stringify!($int_type), "` into an `", stringify!($atomic_type), "`.")]
             #[inline]
             fn from(v: $int_type) -> Self { Self::new(v) }
@@ -2859,9 +2854,8 @@ macro_rules! atomic_int {
             /// # }
             /// ```
             #[inline]
-            #[unstable(feature = "atomic_mut_ptr",
-                   reason = "recently added",
-                   issue = "66893")]
+            #[stable(feature = "atomic_as_ptr", since = "1.70.0")]
+            #[rustc_const_stable(feature = "atomic_as_ptr", since = "1.70.0")]
             pub const fn as_ptr(&self) -> *mut $int_type {
                 self.v.get()
             }
@@ -3124,8 +3118,7 @@ atomic_int_ptr_sized! {
 }
 
 #[inline]
-#[cfg_attr(not(bootstrap), cfg(target_has_atomic))]
-#[cfg_attr(bootstrap, cfg(target_has_atomic = "8"))]
+#[cfg(target_has_atomic)]
 fn strongest_failure_ordering(order: Ordering) -> Ordering {
     match order {
         Release => Relaxed,
@@ -3167,8 +3160,7 @@ unsafe fn atomic_load<T: Copy>(dst: *const T, order: Ordering) -> T {
 }
 
 #[inline]
-#[cfg_attr(not(bootstrap), cfg(target_has_atomic))]
-#[cfg_attr(bootstrap, cfg(target_has_atomic = "8"))]
+#[cfg(target_has_atomic)]
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
 unsafe fn atomic_swap<T: Copy>(dst: *mut T, val: T, order: Ordering) -> T {
     // SAFETY: the caller must uphold the safety contract for `atomic_swap`.
@@ -3185,8 +3177,7 @@ unsafe fn atomic_swap<T: Copy>(dst: *mut T, val: T, order: Ordering) -> T {
 
 /// Returns the previous value (like __sync_fetch_and_add).
 #[inline]
-#[cfg_attr(not(bootstrap), cfg(target_has_atomic))]
-#[cfg_attr(bootstrap, cfg(target_has_atomic = "8"))]
+#[cfg(target_has_atomic)]
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
 unsafe fn atomic_add<T: Copy>(dst: *mut T, val: T, order: Ordering) -> T {
     // SAFETY: the caller must uphold the safety contract for `atomic_add`.
@@ -3203,8 +3194,7 @@ unsafe fn atomic_add<T: Copy>(dst: *mut T, val: T, order: Ordering) -> T {
 
 /// Returns the previous value (like __sync_fetch_and_sub).
 #[inline]
-#[cfg_attr(not(bootstrap), cfg(target_has_atomic))]
-#[cfg_attr(bootstrap, cfg(target_has_atomic = "8"))]
+#[cfg(target_has_atomic)]
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
 unsafe fn atomic_sub<T: Copy>(dst: *mut T, val: T, order: Ordering) -> T {
     // SAFETY: the caller must uphold the safety contract for `atomic_sub`.
@@ -3220,8 +3210,7 @@ unsafe fn atomic_sub<T: Copy>(dst: *mut T, val: T, order: Ordering) -> T {
 }
 
 #[inline]
-#[cfg_attr(not(bootstrap), cfg(target_has_atomic))]
-#[cfg_attr(bootstrap, cfg(target_has_atomic = "8"))]
+#[cfg(target_has_atomic)]
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
 unsafe fn atomic_compare_exchange<T: Copy>(
     dst: *mut T,
@@ -3256,8 +3245,7 @@ unsafe fn atomic_compare_exchange<T: Copy>(
 }
 
 #[inline]
-#[cfg_attr(not(bootstrap), cfg(target_has_atomic))]
-#[cfg_attr(bootstrap, cfg(target_has_atomic = "8"))]
+#[cfg(target_has_atomic)]
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
 unsafe fn atomic_compare_exchange_weak<T: Copy>(
     dst: *mut T,
@@ -3292,8 +3280,7 @@ unsafe fn atomic_compare_exchange_weak<T: Copy>(
 }
 
 #[inline]
-#[cfg_attr(not(bootstrap), cfg(target_has_atomic))]
-#[cfg_attr(bootstrap, cfg(target_has_atomic = "8"))]
+#[cfg(target_has_atomic)]
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
 unsafe fn atomic_and<T: Copy>(dst: *mut T, val: T, order: Ordering) -> T {
     // SAFETY: the caller must uphold the safety contract for `atomic_and`
@@ -3309,8 +3296,7 @@ unsafe fn atomic_and<T: Copy>(dst: *mut T, val: T, order: Ordering) -> T {
 }
 
 #[inline]
-#[cfg_attr(not(bootstrap), cfg(target_has_atomic))]
-#[cfg_attr(bootstrap, cfg(target_has_atomic = "8"))]
+#[cfg(target_has_atomic)]
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
 unsafe fn atomic_nand<T: Copy>(dst: *mut T, val: T, order: Ordering) -> T {
     // SAFETY: the caller must uphold the safety contract for `atomic_nand`
@@ -3326,8 +3312,7 @@ unsafe fn atomic_nand<T: Copy>(dst: *mut T, val: T, order: Ordering) -> T {
 }
 
 #[inline]
-#[cfg_attr(not(bootstrap), cfg(target_has_atomic))]
-#[cfg_attr(bootstrap, cfg(target_has_atomic = "8"))]
+#[cfg(target_has_atomic)]
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
 unsafe fn atomic_or<T: Copy>(dst: *mut T, val: T, order: Ordering) -> T {
     // SAFETY: the caller must uphold the safety contract for `atomic_or`
@@ -3343,8 +3328,7 @@ unsafe fn atomic_or<T: Copy>(dst: *mut T, val: T, order: Ordering) -> T {
 }
 
 #[inline]
-#[cfg_attr(not(bootstrap), cfg(target_has_atomic))]
-#[cfg_attr(bootstrap, cfg(target_has_atomic = "8"))]
+#[cfg(target_has_atomic)]
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
 unsafe fn atomic_xor<T: Copy>(dst: *mut T, val: T, order: Ordering) -> T {
     // SAFETY: the caller must uphold the safety contract for `atomic_xor`
@@ -3361,8 +3345,7 @@ unsafe fn atomic_xor<T: Copy>(dst: *mut T, val: T, order: Ordering) -> T {
 
 /// returns the max value (signed comparison)
 #[inline]
-#[cfg_attr(not(bootstrap), cfg(target_has_atomic))]
-#[cfg_attr(bootstrap, cfg(target_has_atomic = "8"))]
+#[cfg(target_has_atomic)]
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
 unsafe fn atomic_max<T: Copy>(dst: *mut T, val: T, order: Ordering) -> T {
     // SAFETY: the caller must uphold the safety contract for `atomic_max`
@@ -3379,8 +3362,7 @@ unsafe fn atomic_max<T: Copy>(dst: *mut T, val: T, order: Ordering) -> T {
 
 /// returns the min value (signed comparison)
 #[inline]
-#[cfg_attr(not(bootstrap), cfg(target_has_atomic))]
-#[cfg_attr(bootstrap, cfg(target_has_atomic = "8"))]
+#[cfg(target_has_atomic)]
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
 unsafe fn atomic_min<T: Copy>(dst: *mut T, val: T, order: Ordering) -> T {
     // SAFETY: the caller must uphold the safety contract for `atomic_min`
@@ -3397,8 +3379,7 @@ unsafe fn atomic_min<T: Copy>(dst: *mut T, val: T, order: Ordering) -> T {
 
 /// returns the max value (unsigned comparison)
 #[inline]
-#[cfg_attr(not(bootstrap), cfg(target_has_atomic))]
-#[cfg_attr(bootstrap, cfg(target_has_atomic = "8"))]
+#[cfg(target_has_atomic)]
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
 unsafe fn atomic_umax<T: Copy>(dst: *mut T, val: T, order: Ordering) -> T {
     // SAFETY: the caller must uphold the safety contract for `atomic_umax`
@@ -3415,8 +3396,7 @@ unsafe fn atomic_umax<T: Copy>(dst: *mut T, val: T, order: Ordering) -> T {
 
 /// returns the min value (unsigned comparison)
 #[inline]
-#[cfg_attr(not(bootstrap), cfg(target_has_atomic))]
-#[cfg_attr(bootstrap, cfg(target_has_atomic = "8"))]
+#[cfg(target_has_atomic)]
 #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
 unsafe fn atomic_umin<T: Copy>(dst: *mut T, val: T, order: Ordering) -> T {
     // SAFETY: the caller must uphold the safety contract for `atomic_umin`

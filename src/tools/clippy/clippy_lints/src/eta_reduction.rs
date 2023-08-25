@@ -120,6 +120,13 @@ impl<'tcx> LateLintPass<'tcx> for EtaReduction {
             if !is_type_diagnostic_item(cx, callee_ty_unadjusted, sym::Arc);
             if !is_type_diagnostic_item(cx, callee_ty_unadjusted, sym::Rc);
             if let ty::Closure(_, substs) = *closure_ty.kind();
+            // Don't lint if this is an inclusive range expression.
+            // They desugar to a call to `RangeInclusiveNew` which would have odd suggestions. (#10684)
+            if !matches!(higher::Range::hir(body.value), Some(higher::Range {
+                start: Some(_),
+                end: Some(_),
+                limits: rustc_ast::RangeLimits::Closed
+            }));
             then {
                 span_lint_and_then(cx, REDUNDANT_CLOSURE, expr.span, "redundant closure", |diag| {
                     if let Some(mut snippet) = snippet_opt(cx, callee.span) {
@@ -136,6 +143,7 @@ impl<'tcx> LateLintPass<'tcx> for EtaReduction {
                                 // Mutable closure is used after current expr; we cannot consume it.
                                 snippet = format!("&mut {snippet}");
                         }
+
                         diag.span_suggestion(
                             expr.span,
                             "replace the closure with the function itself",
@@ -243,7 +251,7 @@ fn get_ufcs_type_name<'tcx>(cx: &LateContext<'tcx>, method_def_id: DefId, substs
                 | ty::Ref(..)
                 | ty::Slice(_)
                 | ty::Tuple(_) => {
-                    format!("<{}>", EarlyBinder(ty).subst(cx.tcx, substs))
+                    format!("<{}>", EarlyBinder::bind(ty).subst(cx.tcx, substs))
                 },
                 _ => ty.to_string(),
             }

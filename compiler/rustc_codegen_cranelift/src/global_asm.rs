@@ -104,7 +104,6 @@ pub(crate) fn compile_global_asm(
             return Ok(None);
         }
 
-        // FIXME fix linker error on macOS
         if cfg!(not(feature = "inline_asm")) {
             return Err(
                 "asm! and global_asm! support is disabled while compiling rustc_codegen_cranelift"
@@ -125,7 +124,7 @@ pub(crate) fn compile_global_asm(
     let output_object_file = config.output_filenames.temp_path(OutputType::Object, Some(cgu_name));
 
     // Assemble `global_asm`
-    let global_asm_object_file = add_file_stem_postfix(output_object_file.clone(), ".asm");
+    let global_asm_object_file = add_file_stem_postfix(output_object_file, ".asm");
     let mut child = Command::new(&config.assembler)
         .arg("-o")
         .arg(&global_asm_object_file)

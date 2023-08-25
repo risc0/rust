@@ -5,7 +5,7 @@ use super::CodegenUnitDebugContext;
 
 use rustc_hir::def_id::DefId;
 use rustc_middle::ty::layout::{HasParamEnv, LayoutOf};
-use rustc_middle::ty::{self, DefIdTree, Ty};
+use rustc_middle::ty::{self, Ty};
 use trace;
 
 use crate::common::CodegenCx;
@@ -82,8 +82,8 @@ pub(crate) fn fat_pointer_kind<'ll, 'tcx>(
         ty::Foreign(_) => {
             // Assert that pointers to foreign types really are thin:
             debug_assert_eq!(
-                cx.size_of(cx.tcx.mk_imm_ptr(pointee_tail_ty)),
-                cx.size_of(cx.tcx.mk_imm_ptr(cx.tcx.types.u8))
+                cx.size_of(Ty::new_imm_ptr(cx.tcx, pointee_tail_ty)),
+                cx.size_of(Ty::new_imm_ptr(cx.tcx, cx.tcx.types.u8))
             );
             None
         }

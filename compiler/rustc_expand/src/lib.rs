@@ -21,7 +21,7 @@ extern crate tracing;
 extern crate proc_macro as pm;
 
 use rustc_errors::{DiagnosticMessage, SubdiagnosticMessage};
-use rustc_macros::fluent_messages;
+use rustc_fluent_macro::fluent_messages;
 
 mod placeholders;
 mod proc_macro_server;
@@ -64,4 +64,4 @@ mod mut_visit {
     mod tests;
 }
 
-fluent_messages! { "../locales/en-US.ftl" }
+fluent_messages! { "../messages.ftl" }

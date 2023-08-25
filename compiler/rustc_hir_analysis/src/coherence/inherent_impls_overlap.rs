@@ -3,7 +3,7 @@ use rustc_errors::struct_span_err;
 use rustc_hir as hir;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
-use rustc_index::vec::IndexVec;
+use rustc_index::IndexVec;
 use rustc_middle::traits::specialization_graph::OverlapMode;
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_span::Symbol;
@@ -140,7 +140,7 @@ impl<'tcx> InherentOverlapChecker<'tcx> {
         impl1_def_id: DefId,
         impl2_def_id: DefId,
     ) {
-        traits::overlapping_impls(
+        let maybe_overlap = traits::overlapping_impls(
             self.tcx,
             impl1_def_id,
             impl2_def_id,
@@ -148,11 +148,11 @@ impl<'tcx> InherentOverlapChecker<'tcx> {
             // inherent impls without warning.
             SkipLeakCheck::Yes,
             overlap_mode,
-        )
-        .map_or(true, |overlap| {
+        );
+
+        if let Some(overlap) = maybe_overlap {
             self.check_for_common_items_in_impls(impl1_def_id, impl2_def_id, overlap);
-            false
-        });
+        }
     }
 
     fn check_item(&mut self, id: hir::ItemId) {
@@ -302,7 +302,7 @@ impl<'tcx> InherentOverlapChecker<'tcx> {
                         .iter()
                         .flatten()
                         .map(|r| r.impl_blocks.len() as isize - avg as isize)
-                        .map(|v| v.abs() as usize)
+                        .map(|v| v.unsigned_abs())
                         .sum::<usize>();
                     s / connected_regions.len()
                 },

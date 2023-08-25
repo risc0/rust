@@ -10,7 +10,7 @@ use rustc_errors::{
 use rustc_hir::def_id::DefId;
 use rustc_macros::{LintDiagnostic, Subdiagnostic};
 use rustc_middle::ty::{
-    inhabitedness::InhabitedPredicate, PolyExistentialTraitRef, Predicate, Ty, TyCtxt,
+    inhabitedness::InhabitedPredicate, Clause, PolyExistentialTraitRef, Ty, TyCtxt,
 };
 use rustc_session::parse::ParseSess;
 use rustc_span::{edition::Edition, sym, symbol::Ident, Span, Symbol};
@@ -352,7 +352,7 @@ impl AddToDiagnostic for BuiltinTypeAliasGenericBoundsSuggestion {
 #[diag(lint_builtin_trivial_bounds)]
 pub struct BuiltinTrivialBounds<'a> {
     pub predicate_kind_name: &'a str,
-    pub predicate: Predicate<'a>,
+    pub predicate: Clause<'a>,
 }
 
 #[derive(LintDiagnostic)]
@@ -662,6 +662,86 @@ pub struct ForLoopsOverFalliblesSuggestion<'a> {
     pub end_span: Span,
 }
 
+// drop_forget_useless.rs
+#[derive(LintDiagnostic)]
+#[diag(lint_dropping_references)]
+#[note]
+pub struct DropRefDiag<'a> {
+    pub arg_ty: Ty<'a>,
+    #[label]
+    pub label: Span,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_dropping_copy_types)]
+#[note]
+pub struct DropCopyDiag<'a> {
+    pub arg_ty: Ty<'a>,
+    #[label]
+    pub label: Span,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_forgetting_references)]
+#[note]
+pub struct ForgetRefDiag<'a> {
+    pub arg_ty: Ty<'a>,
+    #[label]
+    pub label: Span,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_forgetting_copy_types)]
+#[note]
+pub struct ForgetCopyDiag<'a> {
+    pub arg_ty: Ty<'a>,
+    #[label]
+    pub label: Span,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_undropped_manually_drops)]
+pub struct UndroppedManuallyDropsDiag<'a> {
+    pub arg_ty: Ty<'a>,
+    #[label]
+    pub label: Span,
+    #[subdiagnostic]
+    pub suggestion: UndroppedManuallyDropsSuggestion,
+}
+
+#[derive(Subdiagnostic)]
+#[multipart_suggestion(lint_suggestion, applicability = "machine-applicable")]
+pub struct UndroppedManuallyDropsSuggestion {
+    #[suggestion_part(code = "std::mem::ManuallyDrop::into_inner(")]
+    pub start_span: Span,
+    #[suggestion_part(code = ")")]
+    pub end_span: Span,
+}
+
+// invalid_from_utf8.rs
+#[derive(LintDiagnostic)]
+pub enum InvalidFromUtf8Diag {
+    #[diag(lint_invalid_from_utf8_unchecked)]
+    Unchecked {
+        method: String,
+        valid_up_to: usize,
+        #[label]
+        label: Span,
+    },
+    #[diag(lint_invalid_from_utf8_checked)]
+    Checked {
+        method: String,
+        valid_up_to: usize,
+        #[label]
+        label: Span,
+    },
+}
+
+// reference_casting.rs
+#[derive(LintDiagnostic)]
+#[diag(lint_invalid_reference_casting)]
+pub struct InvalidReferenceCastingDiag;
+
 // hidden_unicode_codepoints.rs
 #[derive(LintDiagnostic)]
 #[diag(lint_hidden_unicode_codepoints)]
@@ -806,9 +886,9 @@ pub struct TyQualified {
 pub struct LintPassByHand;
 
 #[derive(LintDiagnostic)]
-#[diag(lint_non_existant_doc_keyword)]
+#[diag(lint_non_existent_doc_keyword)]
 #[help]
-pub struct NonExistantDocKeyword {
+pub struct NonExistentDocKeyword {
     pub keyword: Symbol,
 }
 
@@ -819,6 +899,10 @@ pub struct DiagOutOfImpl;
 #[derive(LintDiagnostic)]
 #[diag(lint_untranslatable_diag)]
 pub struct UntranslatableDiag;
+
+#[derive(LintDiagnostic)]
+#[diag(lint_trivial_untranslatable_diag)]
+pub struct UntranslatableDiagnosticTrivial;
 
 #[derive(LintDiagnostic)]
 #[diag(lint_bad_opt_access)]
@@ -875,7 +959,7 @@ impl AddToDiagnostic for NonBindingLetSub {
 // levels.rs
 #[derive(LintDiagnostic)]
 #[diag(lint_overruled_attribute)]
-pub struct OverruledAtributeLint<'a> {
+pub struct OverruledAttributeLint<'a> {
     #[label]
     pub overruled: Span,
     pub lint_level: &'a str,
@@ -947,7 +1031,7 @@ pub struct CStringPtr {
 
 // multiple_supertrait_upcastable.rs
 #[derive(LintDiagnostic)]
-#[diag(lint_multple_supertrait_upcastable)]
+#[diag(lint_multiple_supertrait_upcastable)]
 pub struct MultipleSupertraitUpcastable {
     pub ident: Ident,
 }
@@ -1146,6 +1230,18 @@ pub struct NoopMethodCallDiag<'a> {
     pub label: Span,
 }
 
+#[derive(LintDiagnostic)]
+#[diag(lint_suspicious_double_ref_deref)]
+pub struct SuspiciousDoubleRefDerefDiag<'a> {
+    pub ty: Ty<'a>,
+}
+
+#[derive(LintDiagnostic)]
+#[diag(lint_suspicious_double_ref_clone)]
+pub struct SuspiciousDoubleRefCloneDiag<'a> {
+    pub ty: Ty<'a>,
+}
+
 // pass_by_value.rs
 #[derive(LintDiagnostic)]
 #[diag(lint_pass_by_value)]
@@ -1166,7 +1262,7 @@ pub struct RedundantSemicolonsDiag {
 
 // traits.rs
 pub struct DropTraitConstraintsDiag<'a> {
-    pub predicate: Predicate<'a>,
+    pub predicate: Clause<'a>,
     pub tcx: TyCtxt<'a>,
     pub def_id: DefId,
 }
@@ -1210,11 +1306,33 @@ impl<'a> DecorateLint<'a, ()> for DropGlue<'_> {
 #[diag(lint_range_endpoint_out_of_range)]
 pub struct RangeEndpointOutOfRange<'a> {
     pub ty: &'a str,
-    #[suggestion(code = "{start}..={literal}{suffix}", applicability = "machine-applicable")]
-    pub suggestion: Span,
-    pub start: String,
-    pub literal: u128,
-    pub suffix: &'a str,
+    #[subdiagnostic]
+    pub sub: UseInclusiveRange<'a>,
+}
+
+#[derive(Subdiagnostic)]
+pub enum UseInclusiveRange<'a> {
+    #[suggestion(
+        lint_range_use_inclusive_range,
+        code = "{start}..={literal}{suffix}",
+        applicability = "machine-applicable"
+    )]
+    WithoutParen {
+        #[primary_span]
+        sugg: Span,
+        start: String,
+        literal: u128,
+        suffix: &'a str,
+    },
+    #[multipart_suggestion(lint_range_use_inclusive_range, applicability = "machine-applicable")]
+    WithParen {
+        #[suggestion_part(code = "=")]
+        eq_sugg: Span,
+        #[suggestion_part(code = "{literal}{suffix}")]
+        lit_sugg: Span,
+        literal: u128,
+        suffix: &'a str,
+    },
 }
 
 #[derive(LintDiagnostic)]
@@ -1228,6 +1346,8 @@ pub struct OverflowingBinHex<'a> {
     pub sign: OverflowingBinHexSign,
     #[subdiagnostic]
     pub sub: Option<OverflowingBinHexSub<'a>>,
+    #[subdiagnostic]
+    pub sign_bit_sub: Option<OverflowingBinHexSignBitSub<'a>>,
 }
 
 pub enum OverflowingBinHexSign {
@@ -1270,6 +1390,21 @@ pub enum OverflowingBinHexSub<'a> {
     },
     #[help(lint_help)]
     Help { suggestion_ty: &'a str },
+}
+
+#[derive(Subdiagnostic)]
+#[suggestion(
+    lint_sign_bit_suggestion,
+    code = "{lit_no_suffix}{uint_ty} as {int_ty}",
+    applicability = "maybe-incorrect"
+)]
+pub struct OverflowingBinHexSignBitSub<'a> {
+    #[primary_span]
+    pub span: Span,
+    pub lit_no_suffix: &'a str,
+    pub negative_val: String,
+    pub uint_ty: &'a str,
+    pub int_ty: &'a str,
 }
 
 #[derive(LintDiagnostic)]
@@ -1319,6 +1454,36 @@ pub struct OverflowingLiteral<'a> {
 #[derive(LintDiagnostic)]
 #[diag(lint_unused_comparisons)]
 pub struct UnusedComparisons;
+
+#[derive(LintDiagnostic)]
+pub enum InvalidNanComparisons {
+    #[diag(lint_invalid_nan_comparisons_eq_ne)]
+    EqNe {
+        #[subdiagnostic]
+        suggestion: InvalidNanComparisonsSuggestion,
+    },
+    #[diag(lint_invalid_nan_comparisons_lt_le_gt_ge)]
+    LtLeGtGe,
+}
+
+#[derive(Subdiagnostic)]
+pub enum InvalidNanComparisonsSuggestion {
+    #[multipart_suggestion(
+        lint_suggestion,
+        style = "verbose",
+        applicability = "machine-applicable"
+    )]
+    Spanful {
+        #[suggestion_part(code = "!")]
+        neg: Option<Span>,
+        #[suggestion_part(code = ".is_nan()")]
+        float: Span,
+        #[suggestion_part(code = "")]
+        nan_plus_binop: Span,
+    },
+    #[help(lint_suggestion)]
+    Spanless,
+}
 
 pub struct ImproperCTypes<'a> {
     pub ty: Ty<'a>,
@@ -1390,8 +1555,29 @@ pub struct UnusedOp<'a> {
     pub op: &'a str,
     #[label]
     pub label: Span,
-    #[suggestion(style = "verbose", code = "let _ = ", applicability = "machine-applicable")]
-    pub suggestion: Span,
+    #[subdiagnostic]
+    pub suggestion: UnusedOpSuggestion,
+}
+
+#[derive(Subdiagnostic)]
+pub enum UnusedOpSuggestion {
+    #[suggestion(
+        lint_suggestion,
+        style = "verbose",
+        code = "let _ = ",
+        applicability = "maybe-incorrect"
+    )]
+    NormalExpr {
+        #[primary_span]
+        span: Span,
+    },
+    #[multipart_suggestion(lint_suggestion, style = "verbose", applicability = "maybe-incorrect")]
+    BlockTailExpr {
+        #[suggestion_part(code = "let _ = ")]
+        before_span: Span,
+        #[suggestion_part(code = ";")]
+        after_span: Span,
+    },
 }
 
 #[derive(LintDiagnostic)]
@@ -1400,7 +1586,7 @@ pub struct UnusedResult<'a> {
     pub ty: Ty<'a>,
 }
 
-// FIXME(davidtwco): this isn't properly translatable becauses of the
+// FIXME(davidtwco): this isn't properly translatable because of the
 // pre/post strings
 #[derive(LintDiagnostic)]
 #[diag(lint_unused_closure)]
@@ -1411,7 +1597,7 @@ pub struct UnusedClosure<'a> {
     pub post: &'a str,
 }
 
-// FIXME(davidtwco): this isn't properly translatable becauses of the
+// FIXME(davidtwco): this isn't properly translatable because of the
 // pre/post strings
 #[derive(LintDiagnostic)]
 #[diag(lint_unused_generator)]
@@ -1422,7 +1608,7 @@ pub struct UnusedGenerator<'a> {
     pub post: &'a str,
 }
 
-// FIXME(davidtwco): this isn't properly translatable becauses of the pre/post
+// FIXME(davidtwco): this isn't properly translatable because of the pre/post
 // strings
 pub struct UnusedDef<'a, 'b> {
     pub pre: &'a str,
@@ -1434,16 +1620,24 @@ pub struct UnusedDef<'a, 'b> {
 }
 
 #[derive(Subdiagnostic)]
+
 pub enum UnusedDefSuggestion {
     #[suggestion(
         lint_suggestion,
         style = "verbose",
         code = "let _ = ",
-        applicability = "machine-applicable"
+        applicability = "maybe-incorrect"
     )]
-    Default {
+    NormalExpr {
         #[primary_span]
         span: Span,
+    },
+    #[multipart_suggestion(lint_suggestion, style = "verbose", applicability = "maybe-incorrect")]
+    BlockTailExpr {
+        #[suggestion_part(code = "let _ = ")]
+        before_span: Span,
+        #[suggestion_part(code = ";")]
+        after_span: Span,
     },
 }
 
@@ -1458,7 +1652,7 @@ impl<'a> DecorateLint<'a, ()> for UnusedDef<'_, '_> {
         diag.set_arg("def", self.cx.tcx.def_path_str(self.def_id));
         // check for #[must_use = "..."]
         if let Some(note) = self.note {
-            diag.note(note.as_str());
+            diag.note(note.to_string());
         }
         if let Some(sugg) = self.suggestion {
             diag.subdiagnostic(sugg);

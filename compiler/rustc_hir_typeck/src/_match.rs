@@ -65,7 +65,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 // us to give better error messages (pointing to a usually better
                 // arm for inconsistent arms or to the whole match when a `()` type
                 // is required).
-                Expectation::ExpectHasType(ety) if ety != self.tcx.mk_unit() => ety,
+                Expectation::ExpectHasType(ety) if ety != Ty::new_unit(self.tcx) => ety,
                 _ => self.next_ty_var(TypeVariableOrigin {
                     kind: TypeVariableOriginKind::MiscVariable,
                     span: expr.span,
@@ -271,7 +271,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             &cause,
             &mut |err| {
                 if let Some((span, msg)) = &ret_reason {
-                    err.span_label(*span, msg);
+                    err.span_label(*span, msg.clone());
                 } else if let ExprKind::Block(block, _) = &then_expr.kind
                     && let Some(expr) = &block.expr
                 {
@@ -299,7 +299,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             {
                 // check that the `if` expr without `else` is the fn body's expr
                 if expr.span == sp {
-                    return self.get_fn_decl(hir_id).and_then(|(fn_decl, _)| {
+                    return self.get_fn_decl(hir_id).and_then(|(_, fn_decl, _)| {
                         let span = fn_decl.output.span();
                         let snippet = self.tcx.sess.source_map().span_to_snippet(span).ok()?;
                         Some((span, format!("expected `{snippet}` because of this return type")))
@@ -510,6 +510,14 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     ..
                 } = self.type_var_origin(expected)? else { return None; };
 
+                let Some(rpit_local_def_id) = rpit_def_id.as_local() else { return None; };
+                if !matches!(
+                    self.tcx.hir().expect_item(rpit_local_def_id).expect_opaque_ty().origin,
+                    hir::OpaqueTyOrigin::FnReturn(..)
+                ) {
+                    return None;
+                }
+
                 let sig = self.body_fn_sig()?;
 
                 let substs = sig.output().walk().find_map(|arg| {
@@ -528,31 +536,29 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 }
 
                 for ty in [first_ty, second_ty] {
-                    for (pred, _) in self
+                    for (clause, _) in self
                         .tcx
-                        .bound_explicit_item_bounds(rpit_def_id)
+                        .explicit_item_bounds(rpit_def_id)
                         .subst_iter_copied(self.tcx, substs)
                     {
-                        let pred = pred.kind().rebind(match pred.kind().skip_binder() {
-                            ty::PredicateKind::Clause(ty::Clause::Trait(trait_pred)) => {
+                        let pred = clause.kind().rebind(match clause.kind().skip_binder() {
+                            ty::ClauseKind::Trait(trait_pred) => {
                                 // FIXME(rpitit): This will need to be fixed when we move to associated types
                                 assert!(matches!(
                                     *trait_pred.trait_ref.self_ty().kind(),
-                                    ty::Alias(_, ty::AliasTy { def_id, substs, .. })
-                                    if def_id == rpit_def_id && substs == substs
+                                    ty::Alias(_, ty::AliasTy { def_id, substs: alias_substs, .. })
+                                    if def_id == rpit_def_id && substs == alias_substs
                                 ));
-                                ty::PredicateKind::Clause(ty::Clause::Trait(
-                                    trait_pred.with_self_ty(self.tcx, ty),
-                                ))
+                                ty::ClauseKind::Trait(trait_pred.with_self_ty(self.tcx, ty))
                             }
-                            ty::PredicateKind::Clause(ty::Clause::Projection(mut proj_pred)) => {
+                            ty::ClauseKind::Projection(mut proj_pred) => {
                                 assert!(matches!(
                                     *proj_pred.projection_ty.self_ty().kind(),
-                                    ty::Alias(_, ty::AliasTy { def_id, substs, .. })
-                                    if def_id == rpit_def_id && substs == substs
+                                    ty::Alias(_, ty::AliasTy { def_id, substs: alias_substs, .. })
+                                    if def_id == rpit_def_id && substs == alias_substs
                                 ));
                                 proj_pred = proj_pred.with_self_ty(self.tcx, ty);
-                                ty::PredicateKind::Clause(ty::Clause::Projection(proj_pred))
+                                ty::ClauseKind::Projection(proj_pred)
                             }
                             _ => continue,
                         });

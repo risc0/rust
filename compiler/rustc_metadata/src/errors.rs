@@ -396,6 +396,17 @@ pub struct FailedWriteError {
 }
 
 #[derive(Diagnostic)]
+#[diag(metadata_failed_copy_to_stdout)]
+pub struct FailedCopyToStdout {
+    pub filename: PathBuf,
+    pub err: Error,
+}
+
+#[derive(Diagnostic)]
+#[diag(metadata_binary_output_to_tty)]
+pub struct BinaryOutputToTty;
+
+#[derive(Diagnostic)]
 #[diag(metadata_missing_native_library)]
 pub struct MissingNativeLibrary<'a> {
     libname: &'a str,
@@ -498,7 +509,7 @@ impl IntoDiagnostic<'_> for MultipleCandidates {
         diag.code(error_code!(E0464));
         diag.set_span(self.span);
         for (i, candidate) in self.candidates.iter().enumerate() {
-            diag.note(&format!("candidate #{}: {}", i + 1, candidate.display()));
+            diag.note(format!("candidate #{}: {}", i + 1, candidate.display()));
         }
         diag
     }

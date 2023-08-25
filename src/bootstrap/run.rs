@@ -1,9 +1,12 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use clap_complete::shells;
+
 use crate::builder::{Builder, RunConfig, ShouldRun, Step};
 use crate::config::TargetSelection;
 use crate::dist::distdir;
+use crate::flags::get_completion;
 use crate::test;
 use crate::tool::{self, SourceType, Tool};
 use crate::util::output;
@@ -24,7 +27,8 @@ impl Step for ExpandYamlAnchors {
         try_run(
             builder,
             &mut builder.tool_cmd(Tool::ExpandYamlAnchors).arg("generate").arg(&builder.src),
-        );
+        )
+        .unwrap();
     }
 
     fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
@@ -36,17 +40,17 @@ impl Step for ExpandYamlAnchors {
     }
 }
 
-fn try_run(builder: &Builder<'_>, cmd: &mut Command) -> bool {
+fn try_run(builder: &Builder<'_>, cmd: &mut Command) -> Result<(), ()> {
     if !builder.fail_fast {
-        if !builder.try_run(cmd) {
+        if let Err(e) = builder.try_run(cmd) {
             let mut failures = builder.delayed_failures.borrow_mut();
             failures.push(format!("{:?}", cmd));
-            return false;
+            return Err(e);
         }
     } else {
         builder.run(cmd);
     }
-    true
+    Ok(())
 }
 
 #[derive(Debug, PartialOrd, Ord, Copy, Clone, Hash, PartialEq, Eq)]
@@ -105,7 +109,7 @@ impl Step for BumpStage0 {
 
     fn run(self, builder: &Builder<'_>) -> Self::Output {
         let mut cmd = builder.tool_cmd(Tool::BumpStage0);
-        cmd.args(builder.config.cmd.args());
+        cmd.args(builder.config.args());
         builder.run(&mut cmd);
     }
 }
@@ -182,8 +186,7 @@ impl Step for Miri {
         miri.add_rustc_lib_path(builder, compiler);
         // Forward arguments.
         miri.arg("--").arg("--target").arg(target.rustc_target_arg());
-        miri.args(builder.config.cmd.args());
-        miri.args(&builder.config.free_args);
+        miri.args(builder.config.args());
 
         // miri tests need to know about the stage sysroot
         miri.env("MIRI_SYSROOT", &miri_sysroot);
@@ -252,5 +255,58 @@ impl Step for GenerateCopyright {
         builder.run(&mut cmd);
 
         dest
+    }
+}
+
+#[derive(Debug, PartialOrd, Ord, Copy, Clone, Hash, PartialEq, Eq)]
+pub struct GenerateWindowsSys;
+
+impl Step for GenerateWindowsSys {
+    type Output = ();
+    const ONLY_HOSTS: bool = true;
+
+    fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
+        run.path("src/tools/generate-windows-sys")
+    }
+
+    fn make_run(run: RunConfig<'_>) {
+        run.builder.ensure(GenerateWindowsSys);
+    }
+
+    fn run(self, builder: &Builder<'_>) {
+        let mut cmd = builder.tool_cmd(Tool::GenerateWindowsSys);
+        cmd.arg(&builder.src);
+        builder.run(&mut cmd);
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct GenerateCompletions;
+
+impl Step for GenerateCompletions {
+    type Output = ();
+
+    /// Uses `clap_complete` to generate shell completions.
+    fn run(self, builder: &Builder<'_>) {
+        // FIXME(clubby789): enable zsh when clap#4898 is fixed
+        let [bash, fish, powershell] = ["x.py.sh", "x.py.fish", "x.py.ps1"]
+            .map(|filename| builder.src.join("src/etc/completions").join(filename));
+        if let Some(comp) = get_completion(shells::Bash, &bash) {
+            std::fs::write(&bash, comp).expect("writing bash completion");
+        }
+        if let Some(comp) = get_completion(shells::Fish, &fish) {
+            std::fs::write(&fish, comp).expect("writing fish completion");
+        }
+        if let Some(comp) = get_completion(shells::PowerShell, &powershell) {
+            std::fs::write(&powershell, comp).expect("writing powershell completion");
+        }
+    }
+
+    fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
+        run.alias("generate-completions")
+    }
+
+    fn make_run(run: RunConfig<'_>) {
+        run.builder.ensure(GenerateCompletions);
     }
 }

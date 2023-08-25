@@ -6,8 +6,9 @@ use crate::type_error_struct;
 use rustc_ast::util::parser::PREC_POSTFIX;
 use rustc_errors::{struct_span_err, Applicability, Diagnostic, ErrorGuaranteed, StashKey};
 use rustc_hir as hir;
-use rustc_hir::def::{self, CtorKind, Namespace, Res};
+use rustc_hir::def::{self, CtorKind, DefKind, Namespace, Res};
 use rustc_hir::def_id::DefId;
+use rustc_hir::HirId;
 use rustc_hir_analysis::autoderef::Autoderef;
 use rustc_infer::{
     infer,
@@ -89,7 +90,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             _ => self.check_expr(callee_expr),
         };
 
-        let expr_ty = self.structurally_resolved_type(call_expr.span, original_callee_ty);
+        let expr_ty = self.structurally_resolve_type(call_expr.span, original_callee_ty);
 
         let mut autoderef = self.autoderef(callee_expr.span, expr_ty);
         let mut result = None;
@@ -138,7 +139,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         autoderef: &Autoderef<'a, 'tcx>,
     ) -> Option<CallStep<'tcx>> {
         let adjusted_ty =
-            self.structurally_resolved_type(autoderef.span(), autoderef.final_ty(false));
+            self.structurally_resolve_type(autoderef.span(), autoderef.final_ty(false));
 
         // If the callee is a bare function or a closure, then we're all set.
         match *adjusted_ty.kind() {
@@ -232,12 +233,15 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             let Some(trait_def_id) = opt_trait_def_id else { continue };
 
             let opt_input_type = opt_arg_exprs.map(|arg_exprs| {
-                self.tcx.mk_tup_from_iter(arg_exprs.iter().map(|e| {
-                    self.next_ty_var(TypeVariableOrigin {
-                        kind: TypeVariableOriginKind::TypeInference,
-                        span: e.span,
-                    })
-                }))
+                Ty::new_tup_from_iter(
+                    self.tcx,
+                    arg_exprs.iter().map(|e| {
+                        self.next_ty_var(TypeVariableOrigin {
+                            kind: TypeVariableOriginKind::TypeInference,
+                            span: e.span,
+                        })
+                    }),
+                )
             });
 
             if let Some(ok) = self.lookup_method_in_trait(
@@ -311,9 +315,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             let fn_decl_span = if hir.body(body).generator_kind
                 == Some(hir::GeneratorKind::Async(hir::AsyncGeneratorKind::Closure))
             {
-                // Actually need to unwrap a few more layers of HIR to get to
+                // Actually need to unwrap one more layer of HIR to get to
                 // the _real_ closure...
-                let async_closure = hir.parent_id(hir.parent_id(parent_hir_id));
+                let async_closure = hir.parent_id(parent_hir_id);
                 if let hir::Node::Expr(hir::Expr {
                     kind: hir::ExprKind::Closure(&hir::Closure { fn_decl_span, .. }),
                     ..
@@ -376,15 +380,16 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         expected: Expectation<'tcx>,
     ) -> Ty<'tcx> {
         let (fn_sig, def_id) = match *callee_ty.kind() {
-            ty::FnDef(def_id, subst) => {
-                let fn_sig = self.tcx.fn_sig(def_id).subst(self.tcx, subst);
+            ty::FnDef(def_id, substs) => {
+                self.enforce_context_effects(call_expr.hir_id, call_expr.span, def_id, substs);
+                let fn_sig = self.tcx.fn_sig(def_id).subst(self.tcx, substs);
 
                 // Unit testing: function items annotated with
                 // `#[rustc_evaluate_where_clauses]` trigger special output
                 // to let us test the trait evaluation system.
                 if self.tcx.has_attr(def_id, sym::rustc_evaluate_where_clauses) {
                     let predicates = self.tcx.predicates_of(def_id);
-                    let predicates = predicates.instantiate(self.tcx, subst);
+                    let predicates = predicates.instantiate(self.tcx, substs);
                     for (predicate, predicate_span) in predicates {
                         let obligation = Obligation::new(
                             self.tcx,
@@ -397,7 +402,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                             .sess
                             .struct_span_err(
                                 callee_expr.span,
-                                &format!("evaluate({:?}) = {:?}", predicate, result),
+                                format!("evaluate({:?}) = {:?}", predicate, result),
                             )
                             .span_label(predicate_span, "predicate")
                             .emit();
@@ -405,6 +410,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 }
                 (fn_sig, Some(def_id))
             }
+            // FIXME(effects): these arms should error because we can't enforce them
             ty::FnPtr(sig) => (sig, None),
             _ => {
                 for arg in arg_exprs {
@@ -420,25 +426,19 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         .steal_diagnostic(segment.ident.span, StashKey::CallIntoMethod)
                 {
                     // Try suggesting `foo(a)` -> `a.foo()` if possible.
-                    if let Some(ty) =
-                        self.suggest_call_as_method(
-                            &mut diag,
-                            segment,
-                            arg_exprs,
-                            call_expr,
-                            expected
-                        )
-                    {
-                        diag.emit();
-                        return ty;
-                    } else {
-                        diag.emit();
-                    }
+                    self.suggest_call_as_method(
+                        &mut diag,
+                        segment,
+                        arg_exprs,
+                        call_expr,
+                        expected
+                    );
+                    diag.emit();
                 }
 
                 let err = self.report_invalid_callee(call_expr, callee_expr, callee_ty, arg_exprs);
 
-                return self.tcx.ty_error(err);
+                return Ty::new_error(self.tcx, err);
             }
         };
 
@@ -476,6 +476,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     self.tcx.require_lang_item(hir::LangItem::Tuple, Some(sp)),
                     traits::ObligationCause::new(sp, self.body_id, traits::RustCall),
                 );
+                self.require_type_is_sized(ty, sp, traits::RustCall);
             } else {
                 self.tcx.sess.span_err(
                         sp,
@@ -496,9 +497,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         arg_exprs: &'tcx [hir::Expr<'tcx>],
         call_expr: &'tcx hir::Expr<'tcx>,
         expected: Expectation<'tcx>,
-    ) -> Option<Ty<'tcx>> {
+    ) {
         if let [callee_expr, rest @ ..] = arg_exprs {
-            let callee_ty = self.typeck_results.borrow().expr_ty_adjusted_opt(callee_expr)?;
+            let Some(callee_ty) = self.typeck_results.borrow().expr_ty_adjusted_opt(callee_expr) else {
+                return;
+            };
 
             // First, do a probe with `IsSuggestion(true)` to avoid emitting
             // any strange errors. If it's successful, then we'll do a true
@@ -513,7 +516,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 ProbeScope::AllTraits,
                 expected.only_has_type(self),
             ) else {
-                return None;
+                return;
             };
 
             let pick = self.confirm_method(
@@ -525,7 +528,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 segment,
             );
             if pick.illegal_sized_bound.is_some() {
-                return None;
+                return;
             }
 
             let up_to_rcvr_span = segment.ident.span.until(callee_expr.span);
@@ -567,22 +570,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     sugg,
                     Applicability::MaybeIncorrect,
                 );
-
-                // Let's check the method fully now
-                let return_ty = self.check_method_argument_types(
-                    segment.ident.span,
-                    call_expr,
-                    Ok(pick.callee),
-                    rest,
-                    TupleArgumentsFlag::DontTupleArguments,
-                    expected,
-                );
-
-                return Some(return_ty);
             }
         }
-
-        None
     }
 
     fn report_invalid_callee(
@@ -630,7 +619,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         if let Some((removal_span, kind, path)) = &unit_variant {
             err.span_suggestion_verbose(
                 *removal_span,
-                &format!(
+                format!(
                     "`{path}` is a unit {kind}, and does not take parentheses to be constructed",
                 ),
                 "",
@@ -668,7 +657,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         if !self.maybe_suggest_bad_array_definition(&mut err, call_expr, callee_expr) {
             if let Some((maybe_def, output_ty, _)) = self.extract_callable_info(callee_ty)
-                && !self.type_is_sized_modulo_regions(self.param_env, output_ty, callee_expr.span)
+                && !self.type_is_sized_modulo_regions(self.param_env, output_ty)
             {
                 let descr = match maybe_def {
                     DefIdOrName::DefId(def_id) => self.tcx.def_descr(def_id),
@@ -754,6 +743,60 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         );
 
         fn_sig.output()
+    }
+
+    #[tracing::instrument(level = "debug", skip(self, span))]
+    pub(super) fn enforce_context_effects(
+        &self,
+        call_expr_hir: HirId,
+        span: Span,
+        callee_did: DefId,
+        callee_substs: SubstsRef<'tcx>,
+    ) {
+        let tcx = self.tcx;
+
+        if !tcx.features().effects || tcx.sess.opts.unstable_opts.unleash_the_miri_inside_of_you {
+            return;
+        }
+
+        // Compute the constness required by the context.
+        let context = tcx.hir().enclosing_body_owner(call_expr_hir);
+        let const_context = tcx.hir().body_const_context(context);
+
+        let kind = tcx.def_kind(context.to_def_id());
+        debug_assert_ne!(kind, DefKind::ConstParam);
+
+        if tcx.has_attr(context.to_def_id(), sym::rustc_do_not_const_check) {
+            trace!("do not const check this context");
+            return;
+        }
+
+        let effect = match const_context {
+            Some(hir::ConstContext::Static(_) | hir::ConstContext::Const) => tcx.consts.false_,
+            Some(hir::ConstContext::ConstFn) => {
+                let substs = ty::InternalSubsts::identity_for_item(tcx, context);
+                substs.host_effect_param().expect("ConstContext::Maybe must have host effect param")
+            }
+            None => tcx.consts.true_,
+        };
+
+        let generics = tcx.generics_of(callee_did);
+
+        trace!(?effect, ?generics, ?callee_substs);
+
+        if let Some(idx) = generics.host_effect_index {
+            let param = callee_substs.const_at(idx);
+            let cause = self.misc(span);
+            match self.at(&cause, self.param_env).eq(infer::DefineOpaqueTypes::No, effect, param) {
+                Ok(infer::InferOk { obligations, value: () }) => {
+                    self.register_predicates(obligations);
+                }
+                Err(e) => {
+                    // FIXME(effects): better diagnostic
+                    self.err_ctxt().report_mismatched_consts(&cause, effect, param, e).emit();
+                }
+            }
+        }
     }
 
     fn confirm_overloaded_call(

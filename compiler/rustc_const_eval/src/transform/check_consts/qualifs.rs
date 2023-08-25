@@ -9,7 +9,7 @@ use rustc_middle::mir;
 use rustc_middle::mir::*;
 use rustc_middle::ty::{self, subst::SubstsRef, AdtDef, Ty};
 use rustc_trait_selection::traits::{
-    self, ImplSource, Obligation, ObligationCause, SelectionContext,
+    self, ImplSource, Obligation, ObligationCause, ObligationCtxt, SelectionContext,
 };
 
 use super::ConstCx;
@@ -157,7 +157,7 @@ impl Qualif for NeedsNonConstDrop {
             cx.tcx,
             ObligationCause::dummy_with_span(cx.body.span),
             cx.param_env,
-            ty::Binder::dummy(cx.tcx.at(cx.body.span).mk_trait_ref(LangItem::Destruct, [ty]))
+            ty::TraitRef::from_lang_item(cx.tcx, LangItem::Destruct, cx.body.span, [ty])
                 .with_constness(ty::BoundConstness::ConstIfConst),
         );
 
@@ -172,7 +172,7 @@ impl Qualif for NeedsNonConstDrop {
 
         if !matches!(
             impl_src,
-            ImplSource::ConstDestruct(_) | ImplSource::Param(_, ty::BoundConstness::ConstIfConst)
+            ImplSource::Builtin(_) | ImplSource::Param(_, ty::BoundConstness::ConstIfConst)
         ) {
             // If our const destruct candidate is not ConstDestruct or implied by the param env,
             // then it's bad
@@ -184,7 +184,10 @@ impl Qualif for NeedsNonConstDrop {
         }
 
         // If we had any errors, then it's bad
-        !traits::fully_solve_obligations(&infcx, impl_src.nested_obligations()).is_empty()
+        let ocx = ObligationCtxt::new(&infcx);
+        ocx.register_obligations(impl_src.nested_obligations());
+        let errors = ocx.select_all_or_error();
+        !errors.is_empty()
     }
 
     fn in_adt_inherently<'tcx>(
@@ -220,7 +223,7 @@ impl Qualif for CustomEq {
         def: AdtDef<'tcx>,
         substs: SubstsRef<'tcx>,
     ) -> bool {
-        let ty = cx.tcx.mk_adt(def, substs);
+        let ty = Ty::new_adt(cx.tcx, def, substs);
         !ty.is_structural_eq_shallow(cx.tcx)
     }
 }
@@ -341,15 +344,18 @@ where
     };
 
     // Check the qualifs of the value of `const` items.
-    // FIXME(valtrees): check whether const qualifs should behave the same
-    // way for type and mir constants.
     let uneval = match constant.literal {
         ConstantKind::Ty(ct)
-            if matches!(ct.kind(), ty::ConstKind::Param(_) | ty::ConstKind::Error(_)) =>
+            if matches!(
+                ct.kind(),
+                ty::ConstKind::Param(_) | ty::ConstKind::Error(_) | ty::ConstKind::Value(_)
+            ) =>
         {
             None
         }
-        ConstantKind::Ty(c) => bug!("expected ConstKind::Param here, found {:?}", c),
+        ConstantKind::Ty(c) => {
+            bug!("expected ConstKind::Param or ConstKind::Value here, found {:?}", c)
+        }
         ConstantKind::Unevaluated(uv, _) => Some(uv),
         ConstantKind::Val(..) => None,
     };
@@ -361,9 +367,8 @@ where
         assert!(promoted.is_none() || Q::ALLOW_PROMOTED);
 
         // Don't peek inside trait associated constants.
-        if promoted.is_none() && cx.tcx.trait_of_item(def.did).is_none() {
-            assert_eq!(def.const_param_did, None, "expected associated const: {def:?}");
-            let qualifs = cx.tcx.at(constant.span).mir_const_qualif(def.did);
+        if promoted.is_none() && cx.tcx.trait_of_item(def).is_none() {
+            let qualifs = cx.tcx.at(constant.span).mir_const_qualif(def);
 
             if !Q::in_qualifs(&qualifs) {
                 return false;

@@ -20,19 +20,20 @@ pub enum Profile {
     Codegen,
     Library,
     Tools,
-    User,
+    Dist,
     None,
 }
 
-/// A list of historical hashes of `src/etc/vscode_settings.json`.
+/// A list of historical hashes of `src/etc/rust_analyzer_settings.json`.
 /// New entries should be appended whenever this is updated so we can detect
 /// outdated vs. user-modified settings files.
 static SETTINGS_HASHES: &[&str] = &[
     "ea67e259dedf60d4429b6c349a564ffcd1563cf41c920a856d1f5b16b4701ac8",
     "56e7bf011c71c5d81e0bf42e84938111847a810eee69d906bba494ea90b51922",
     "af1b5efe196aed007577899db9dae15d6dbc923d6fa42fa0934e68617ba9bbe0",
+    "3468fea433c25fff60be6b71e8a215a732a7b1268b6a83bf10d024344e140541",
 ];
-static VSCODE_SETTINGS: &str = include_str!("../etc/vscode_settings.json");
+static RUST_ANALYZER_SETTINGS: &str = include_str!("../etc/rust_analyzer_settings.json");
 
 impl Profile {
     fn include_path(&self, src_path: &Path) -> PathBuf {
@@ -42,7 +43,7 @@ impl Profile {
     pub fn all() -> impl Iterator<Item = Self> {
         use Profile::*;
         // N.B. these are ordered by how they are displayed, not alphabetically
-        [Library, Compiler, Codegen, Tools, User, None].iter().copied()
+        [Library, Compiler, Codegen, Tools, Dist, None].iter().copied()
     }
 
     pub fn purpose(&self) -> String {
@@ -52,7 +53,7 @@ impl Profile {
             Compiler => "Contribute to the compiler itself",
             Codegen => "Contribute to the compiler, and also modify LLVM or codegen",
             Tools => "Contribute to tools which depend on the compiler, but do not modify it directly (e.g. rustdoc, clippy, miri)",
-            User => "Install Rust from source",
+            Dist => "Install Rust from source",
             None => "Do not modify `config.toml`"
         }
         .to_string()
@@ -72,7 +73,7 @@ impl Profile {
             Profile::Codegen => "codegen",
             Profile::Library => "library",
             Profile::Tools => "tools",
-            Profile::User => "user",
+            Profile::Dist => "dist",
             Profile::None => "none",
         }
     }
@@ -86,7 +87,7 @@ impl FromStr for Profile {
             "lib" | "library" => Ok(Profile::Library),
             "compiler" => Ok(Profile::Compiler),
             "llvm" | "codegen" => Ok(Profile::Codegen),
-            "maintainer" | "user" => Ok(Profile::User),
+            "maintainer" | "dist" | "user" => Ok(Profile::Dist),
             "tools" | "tool" | "rustdoc" | "clippy" | "miri" | "rustfmt" | "rls" => {
                 Ok(Profile::Tools)
             }
@@ -159,7 +160,7 @@ pub fn setup(config: &Config, profile: Profile) {
             "test src/tools/rustfmt",
         ],
         Profile::Library => &["check", "build", "test library/std", "doc"],
-        Profile::User => &["dist", "build"],
+        Profile::Dist => &["dist", "build"],
     };
 
     println!();
@@ -169,10 +170,18 @@ pub fn setup(config: &Config, profile: Profile) {
         println!("- `x.py {}`", cmd);
     }
 
-    if profile != Profile::User {
+    if profile != Profile::Dist {
         println!(
             "For more suggestions, see https://rustc-dev-guide.rust-lang.org/building/suggested.html"
         );
+    }
+
+    if profile == Profile::Tools {
+        eprintln!();
+        eprintln!(
+            "note: the `tools` profile sets up the `stage2` toolchain (use \
+            `rustup toolchain link 'name' host/build/stage2` to use rustc)"
+        )
     }
 
     let path = &config.config.clone().unwrap_or(PathBuf::from("config.toml"));
@@ -194,7 +203,7 @@ fn setup_config_toml(path: &PathBuf, profile: Profile, config: &Config) {
             "note: this will use the configuration in {}",
             profile.include_path(&config.src).display()
         );
-        crate::detail_exit(1);
+        crate::detail_exit_macro!(1);
     }
 
     let settings = format!(
@@ -380,7 +389,7 @@ pub fn interactive_path() -> io::Result<Profile> {
         io::stdin().read_line(&mut input)?;
         if input.is_empty() {
             eprintln!("EOF on stdin, when expecting answer to question.  Giving up.");
-            crate::detail_exit(1);
+            crate::detail_exit_macro!(1);
         }
         break match parse_with_abbrev(&input) {
             Ok(profile) => profile,
@@ -489,7 +498,7 @@ undesirable, simply delete the `pre-push` file from .git/hooks."
     Ok(())
 }
 
-/// Sets up or displays `src/etc/vscode_settings.json`
+/// Sets up or displays `src/etc/rust_analyzer_settings.json`
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct Vscode;
 
@@ -573,17 +582,17 @@ fn create_vscode_settings_maybe(config: &Config) -> io::Result<()> {
             Some(false) => {
                 // exists and is not current version or outdated, so back it up
                 let mut backup = vscode_settings.clone();
-                backup.set_extension("bak");
+                backup.set_extension("json.bak");
                 eprintln!("warning: copying `settings.json` to `settings.json.bak`");
                 fs::copy(&vscode_settings, &backup)?;
                 "Updated"
             }
             _ => "Created",
         };
-        fs::write(&vscode_settings, &VSCODE_SETTINGS)?;
+        fs::write(&vscode_settings, &RUST_ANALYZER_SETTINGS)?;
         println!("{verb} `.vscode/settings.json`");
     } else {
-        println!("\n{VSCODE_SETTINGS}");
+        println!("\n{RUST_ANALYZER_SETTINGS}");
     }
     Ok(())
 }

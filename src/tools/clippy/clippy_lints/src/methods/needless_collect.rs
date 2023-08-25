@@ -1,6 +1,5 @@
 use super::NEEDLESS_COLLECT;
 use clippy_utils::diagnostics::{span_lint_and_sugg, span_lint_hir_and_then};
-use clippy_utils::higher;
 use clippy_utils::source::{snippet, snippet_with_applicability};
 use clippy_utils::sugg::Sugg;
 use clippy_utils::ty::{is_type_diagnostic_item, make_normalized_projection, make_projection};
@@ -8,6 +7,7 @@ use clippy_utils::{
     can_move_expr_to_closure, get_enclosing_block, get_parent_node, is_trait_method, path_to_local, path_to_local_id,
     CaptureKind,
 };
+use clippy_utils::{fn_def_id, higher};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_errors::{Applicability, MultiSpan};
 use rustc_hir::intravisit::{walk_block, walk_expr, Visitor};
@@ -16,7 +16,7 @@ use rustc_hir::{
 };
 use rustc_lint::LateContext;
 use rustc_middle::hir::nested_filter;
-use rustc_middle::ty::{self, AssocKind, EarlyBinder, GenericArg, GenericArgKind, Ty};
+use rustc_middle::ty::{self, AssocKind, ClauseKind, EarlyBinder, GenericArg, GenericArgKind, Ty};
 use rustc_span::symbol::Ident;
 use rustc_span::{sym, Span, Symbol};
 
@@ -32,6 +32,8 @@ pub(super) fn check<'tcx>(
     if let Some(parent) = get_parent_node(cx.tcx, collect_expr.hir_id) {
         match parent {
             Node::Expr(parent) => {
+                check_collect_into_intoiterator(cx, parent, collect_expr, call_span, iter_expr);
+
                 if let ExprKind::MethodCall(name, _, args @ ([] | [_]), _) = parent.kind {
                     let mut app = Applicability::MachineApplicable;
                     let name = name.ident.as_str();
@@ -134,6 +136,68 @@ pub(super) fn check<'tcx>(
     }
 }
 
+/// checks for for collecting into a (generic) method or function argument
+/// taking an `IntoIterator`
+fn check_collect_into_intoiterator<'tcx>(
+    cx: &LateContext<'tcx>,
+    parent: &'tcx Expr<'tcx>,
+    collect_expr: &'tcx Expr<'tcx>,
+    call_span: Span,
+    iter_expr: &'tcx Expr<'tcx>,
+) {
+    if let Some(id) = fn_def_id(cx, parent) {
+        let args = match parent.kind {
+            ExprKind::Call(_, args) | ExprKind::MethodCall(_, _, args, _) => args,
+            _ => &[],
+        };
+        // find the argument index of the `collect_expr` in the
+        // function / method call
+        if let Some(arg_idx) = args.iter().position(|e| e.hir_id == collect_expr.hir_id).map(|i| {
+            if matches!(parent.kind, ExprKind::MethodCall(_, _, _, _)) {
+                i + 1
+            } else {
+                i
+            }
+        }) {
+            // extract the input types of the function/method call
+            // that contains `collect_expr`
+            let inputs = cx
+                .tcx
+                .liberate_late_bound_regions(id, cx.tcx.fn_sig(id).subst_identity())
+                .inputs();
+
+            // map IntoIterator generic bounds to their signature
+            // types and check whether the argument type is an
+            // `IntoIterator`
+            if cx
+                .tcx
+                .param_env(id)
+                .caller_bounds()
+                .into_iter()
+                .filter_map(|p| {
+                    if let ClauseKind::Trait(t) = p.kind().skip_binder()
+                            && cx.tcx.is_diagnostic_item(sym::IntoIterator,t.trait_ref.def_id) {
+                                Some(t.self_ty())
+                            } else {
+                                None
+                            }
+                })
+                .any(|ty| ty == inputs[arg_idx])
+            {
+                span_lint_and_sugg(
+                    cx,
+                    NEEDLESS_COLLECT,
+                    call_span.with_lo(iter_expr.span.hi()),
+                    NEEDLESS_COLLECT_MSG,
+                    "remove this call",
+                    String::new(),
+                    Applicability::MachineApplicable,
+                );
+            }
+        }
+    }
+}
+
 /// Checks if the given method call matches the expected signature of `([&[mut]] self) -> bool`
 fn is_is_empty_sig(cx: &LateContext<'_>, call_id: HirId) -> bool {
     cx.typeck_results().type_dependent_def_id(call_id).map_or(false, |id| {
@@ -151,7 +215,7 @@ fn iterates_same_ty<'tcx>(cx: &LateContext<'tcx>, iter_ty: Ty<'tcx>, collect_ty:
         && let Some(into_iter_item_proj) = make_projection(cx.tcx, into_iter_trait, item, [collect_ty])
         && let Ok(into_iter_item_ty) = cx.tcx.try_normalize_erasing_regions(
             cx.param_env,
-            cx.tcx.mk_projection(into_iter_item_proj.def_id, into_iter_item_proj.substs)
+            Ty::new_projection(cx.tcx,into_iter_item_proj.def_id, into_iter_item_proj.substs)
         )
     {
         iter_item_ty == into_iter_item_ty
@@ -174,10 +238,10 @@ fn is_contains_sig(cx: &LateContext<'_>, call_id: HirId, iter_expr: &Expr<'_>) -
             .associated_items(iter_trait)
             .find_by_name_and_kind(cx.tcx, Ident::with_dummy_span(Symbol::intern("Item")), AssocKind::Type, iter_trait)
         && let substs = cx.tcx.mk_substs(&[GenericArg::from(typeck.expr_ty_adjusted(iter_expr))])
-        && let proj_ty = cx.tcx.mk_projection(iter_item.def_id, substs)
+        && let proj_ty = Ty::new_projection(cx.tcx,iter_item.def_id, substs)
         && let Ok(item_ty) = cx.tcx.try_normalize_erasing_regions(cx.param_env, proj_ty)
     {
-        item_ty == EarlyBinder(search_ty).subst(cx.tcx, cx.typeck_results().node_substs(call_id))
+        item_ty == EarlyBinder::bind(search_ty).subst(cx.tcx, cx.typeck_results().node_substs(call_id))
     } else {
         false
     }
@@ -258,7 +322,7 @@ impl<'tcx> Visitor<'tcx> for IterFunctionVisitor<'_, 'tcx> {
 
     fn visit_expr(&mut self, expr: &'tcx Expr<'tcx>) {
         // Check function calls on our collection
-        if let ExprKind::MethodCall(method_name, recv, [args @ ..], _) = &expr.kind {
+        if let ExprKind::MethodCall(method_name, recv, args, _) = &expr.kind {
             if method_name.ident.name == sym!(collect) && is_trait_method(self.cx, expr, sym::Iterator) {
                 self.current_mutably_captured_ids = get_captured_ids(self.cx, self.cx.typeck_results().expr_ty(recv));
                 self.visit_expr(recv);

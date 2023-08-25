@@ -6,6 +6,7 @@ use rustc_middle::bug;
 use rustc_middle::ty::layout::{FnAbiOf, LayoutOf, TyAndLayout};
 use rustc_middle::ty::print::{with_no_trimmed_paths, with_no_visible_paths};
 use rustc_middle::ty::{self, Ty, TypeVisitableExt};
+use rustc_target::abi::HasDataLayout;
 use rustc_target::abi::{Abi, Align, FieldsShape};
 use rustc_target::abi::{Int, Pointer, F32, F64};
 use rustc_target::abi::{PointeeInfo, Scalar, Size, TyAbiInterface, Variants};
@@ -192,14 +193,14 @@ pub trait LayoutLlvmExt<'tcx> {
     ) -> &'a Type;
     fn llvm_field_index<'a>(&self, cx: &CodegenCx<'a, 'tcx>, index: usize) -> u64;
     fn pointee_info_at<'a>(&self, cx: &CodegenCx<'a, 'tcx>, offset: Size) -> Option<PointeeInfo>;
+    fn scalar_copy_llvm_type<'a>(&self, cx: &CodegenCx<'a, 'tcx>) -> Option<&'a Type>;
 }
 
 impl<'tcx> LayoutLlvmExt<'tcx> for TyAndLayout<'tcx> {
     fn is_llvm_immediate(&self) -> bool {
         match self.abi {
             Abi::Scalar(_) | Abi::Vector { .. } => true,
-            Abi::ScalarPair(..) => false,
-            Abi::Uninhabited | Abi::Aggregate { .. } => self.is_zst(),
+            Abi::ScalarPair(..) | Abi::Uninhabited | Abi::Aggregate { .. } => false,
         }
     }
 
@@ -336,12 +337,13 @@ impl<'tcx> LayoutLlvmExt<'tcx> for TyAndLayout<'tcx> {
             // only wide pointer boxes are handled as pointers
             // thin pointer boxes with scalar allocators are handled by the general logic below
             ty::Adt(def, substs) if def.is_box() && cx.layout_of(substs.type_at(1)).is_zst() => {
-                let ptr_ty = cx.tcx.mk_mut_ptr(self.ty.boxed_ty());
+                let ptr_ty = Ty::new_mut_ptr(cx.tcx, self.ty.boxed_ty());
                 return cx.layout_of(ptr_ty).scalar_pair_element_llvm_type(cx, index, immediate);
             }
             // `dyn* Trait` has the same ABI as `*mut dyn Trait`
             ty::Dynamic(bounds, region, ty::DynStar) => {
-                let ptr_ty = cx.tcx.mk_mut_ptr(cx.tcx.mk_dynamic(bounds, region, ty::Dyn));
+                let ptr_ty =
+                    Ty::new_mut_ptr(cx.tcx, Ty::new_dynamic(cx.tcx, bounds, region, ty::Dyn));
                 return cx.layout_of(ptr_ty).scalar_pair_element_llvm_type(cx, index, immediate);
             }
             _ => {}
@@ -414,5 +416,36 @@ impl<'tcx> LayoutLlvmExt<'tcx> for TyAndLayout<'tcx> {
 
         cx.pointee_infos.borrow_mut().insert((self.ty, offset), result);
         result
+    }
+
+    fn scalar_copy_llvm_type<'a>(&self, cx: &CodegenCx<'a, 'tcx>) -> Option<&'a Type> {
+        debug_assert!(self.is_sized());
+
+        // FIXME: this is a fairly arbitrary choice, but 128 bits on WASM
+        // (matching the 128-bit SIMD types proposal) and 256 bits on x64
+        // (like AVX2 registers) seems at least like a tolerable starting point.
+        let threshold = cx.data_layout().pointer_size * 4;
+        if self.layout.size() > threshold {
+            return None;
+        }
+
+        // Vectors, even for non-power-of-two sizes, have the same layout as
+        // arrays but don't count as aggregate types
+        if let FieldsShape::Array { count, .. } = self.layout.fields()
+            && let element = self.field(cx, 0)
+            && element.ty.is_integral()
+        {
+            // `cx.type_ix(bits)` is tempting here, but while that works great
+            // for things that *stay* as memory-to-memory copies, it also ends
+            // up suppressing vectorization as it introduces shifts when it
+            // extracts all the individual values.
+
+            let ety = element.llvm_type(cx);
+            return Some(cx.type_vector(ety, *count));
+        }
+
+        // FIXME: The above only handled integer arrays; surely more things
+        // would also be possible. Be careful about provenance, though!
+        None
     }
 }

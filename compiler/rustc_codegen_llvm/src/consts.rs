@@ -1,13 +1,14 @@
 use crate::base;
 use crate::common::{self, CodegenCx};
 use crate::debuginfo;
-use crate::errors::{InvalidMinimumAlignment, SymbolAlreadyDefined};
+use crate::errors::{
+    InvalidMinimumAlignmentNotPowerOfTwo, InvalidMinimumAlignmentTooLarge, SymbolAlreadyDefined,
+};
 use crate::llvm::{self, True};
 use crate::type_::Type;
 use crate::type_of::LayoutLlvmExt;
 use crate::value::Value;
 use cstr::cstr;
-use libc::c_uint;
 use rustc_codegen_ssa::traits::*;
 use rustc_hir::def_id::DefId;
 use rustc_middle::middle::codegen_fn_attrs::{CodegenFnAttrFlags, CodegenFnAttrs};
@@ -20,7 +21,9 @@ use rustc_middle::ty::layout::LayoutOf;
 use rustc_middle::ty::{self, Instance, Ty};
 use rustc_middle::{bug, span_bug};
 use rustc_session::config::Lto;
-use rustc_target::abi::{Align, HasDataLayout, Primitive, Scalar, Size, WrappingRange};
+use rustc_target::abi::{
+    Align, AlignFromBytesError, HasDataLayout, Primitive, Scalar, Size, WrappingRange,
+};
 use std::ops::Range;
 
 pub fn const_alloc_to_llvm<'ll>(cx: &CodegenCx<'ll, '_>, alloc: ConstAllocation<'_>) -> &'ll Value {
@@ -130,9 +133,14 @@ fn set_global_alignment<'ll>(cx: &CodegenCx<'ll, '_>, gv: &'ll Value, mut align:
     if let Some(min) = cx.sess().target.min_global_align {
         match Align::from_bits(min) {
             Ok(min) => align = align.max(min),
-            Err(err) => {
-                cx.sess().emit_err(InvalidMinimumAlignment { err });
-            }
+            Err(err) => match err {
+                AlignFromBytesError::NotPowerOfTwo(align) => {
+                    cx.sess().emit_err(InvalidMinimumAlignmentNotPowerOfTwo { align });
+                }
+                AlignFromBytesError::TooLarge(align) => {
+                    cx.sess().emit_err(InvalidMinimumAlignmentTooLarge { align });
+                }
+            },
         }
     }
     unsafe {
@@ -486,10 +494,10 @@ impl<'ll> StaticMethods for CodegenCx<'ll, '_> {
             // go into custom sections of the wasm executable.
             if self.tcx.sess.target.is_like_wasm {
                 if let Some(section) = attrs.link_section {
-                    let section = llvm::LLVMMDStringInContext(
+                    let section = llvm::LLVMMDStringInContext2(
                         self.llcx,
                         section.as_str().as_ptr().cast(),
-                        section.as_str().len() as c_uint,
+                        section.as_str().len(),
                     );
                     assert!(alloc.provenance().ptrs().is_empty());
 
@@ -498,17 +506,15 @@ impl<'ll> StaticMethods for CodegenCx<'ll, '_> {
                     // as part of the interpreter execution).
                     let bytes =
                         alloc.inspect_with_uninit_and_ptr_outside_interpreter(0..alloc.len());
-                    let alloc = llvm::LLVMMDStringInContext(
-                        self.llcx,
-                        bytes.as_ptr().cast(),
-                        bytes.len() as c_uint,
-                    );
+                    let alloc =
+                        llvm::LLVMMDStringInContext2(self.llcx, bytes.as_ptr().cast(), bytes.len());
                     let data = [section, alloc];
-                    let meta = llvm::LLVMMDNodeInContext(self.llcx, data.as_ptr(), 2);
+                    let meta = llvm::LLVMMDNodeInContext2(self.llcx, data.as_ptr(), data.len());
+                    let val = llvm::LLVMMetadataAsValue(self.llcx, meta);
                     llvm::LLVMAddNamedMetadataOperand(
                         self.llmod,
                         "wasm.custom_sections\0".as_ptr().cast(),
-                        meta,
+                        val,
                     );
                 }
             } else {

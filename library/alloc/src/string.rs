@@ -45,9 +45,9 @@
 use core::error::Error;
 use core::fmt;
 use core::hash;
-use core::iter::FusedIterator;
 #[cfg(not(no_global_oom_handling))]
-use core::iter::{from_fn, FromIterator};
+use core::iter::from_fn;
+use core::iter::FusedIterator;
 #[cfg(not(no_global_oom_handling))]
 use core::ops::Add;
 #[cfg(not(no_global_oom_handling))]
@@ -359,7 +359,7 @@ use crate::vec::Vec;
 /// [Deref]: core::ops::Deref "ops::Deref"
 /// [`Deref`]: core::ops::Deref "ops::Deref"
 /// [`as_str()`]: String::as_str
-#[derive(PartialOrd, Eq, Ord)]
+#[derive(PartialEq, PartialOrd, Eq, Ord)]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[cfg_attr(not(test), lang = "String")]
 pub struct String {
@@ -1851,30 +1851,31 @@ impl String {
     }
 
     /// Consumes and leaks the `String`, returning a mutable reference to the contents,
-    /// `&'static mut str`.
+    /// `&'a mut str`.
     ///
-    /// This is mainly useful for data that lives for the remainder of
-    /// the program's life. Dropping the returned reference will cause a memory
-    /// leak.
+    /// The caller has free choice over the returned lifetime, including `'static`. Indeed,
+    /// this function is ideally used for data that lives for the remainder of the program's life,
+    /// as dropping the returned reference will cause a memory leak.
     ///
     /// It does not reallocate or shrink the `String`,
     /// so the leaked allocation may include unused capacity that is not part
-    /// of the returned slice.
+    /// of the returned slice. If you don't want that, call [`into_boxed_str`],
+    /// and then [`Box::leak`].
+    ///
+    /// [`into_boxed_str`]: Self::into_boxed_str
     ///
     /// # Examples
     ///
     /// Simple usage:
     ///
     /// ```
-    /// #![feature(string_leak)]
-    ///
     /// let x = String::from("bucket");
     /// let static_ref: &'static mut str = x.leak();
     /// assert_eq!(static_ref, "bucket");
     /// ```
-    #[unstable(feature = "string_leak", issue = "102929")]
+    #[stable(feature = "string_leak", since = "1.72.0")]
     #[inline]
-    pub fn leak(self) -> &'static mut str {
+    pub fn leak<'a>(self) -> &'a mut str {
         let slice = self.vec.leak();
         unsafe { from_utf8_unchecked_mut(slice) }
     }
@@ -2207,14 +2208,6 @@ impl<'a, 'b> Pattern<'a> for &'b String {
     }
 }
 
-#[stable(feature = "rust1", since = "1.0.0")]
-impl PartialEq for String {
-    #[inline]
-    fn eq(&self, other: &String) -> bool {
-        PartialEq::eq(&self[..], &other[..])
-    }
-}
-
 macro_rules! impl_eq {
     ($lhs:ty, $rhs: ty) => {
         #[stable(feature = "rust1", since = "1.0.0")]
@@ -2255,8 +2248,7 @@ impl_eq! { Cow<'a, str>, &'b str }
 impl_eq! { Cow<'a, str>, String }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-#[rustc_const_unstable(feature = "const_default_impls", issue = "87864")]
-impl const Default for String {
+impl Default for String {
     /// Creates an empty `String`.
     #[inline]
     fn default() -> String {
@@ -2536,6 +2528,15 @@ impl<T: fmt::Display + ?Sized> ToString for T {
 }
 
 #[cfg(not(no_global_oom_handling))]
+#[unstable(feature = "ascii_char", issue = "110998")]
+impl ToString for core::ascii::Char {
+    #[inline]
+    fn to_string(&self) -> String {
+        self.as_str().to_owned()
+    }
+}
+
+#[cfg(not(no_global_oom_handling))]
 #[stable(feature = "char_to_string_specialization", since = "1.46.0")]
 impl ToString for char {
     #[inline]
@@ -2620,6 +2621,15 @@ impl ToString for String {
     #[inline]
     fn to_string(&self) -> String {
         self.to_owned()
+    }
+}
+
+#[cfg(not(no_global_oom_handling))]
+#[stable(feature = "fmt_arguments_to_string_specialization", since = "1.71.0")]
+impl ToString for fmt::Arguments<'_> {
+    #[inline]
+    fn to_string(&self) -> String {
+        crate::fmt::format(*self)
     }
 }
 
@@ -2741,7 +2751,7 @@ impl<'a> From<Cow<'a, str>> for String {
     /// ```
     /// # use std::borrow::Cow;
     /// // If the string is not owned...
-    /// let cow: Cow<str> = Cow::Borrowed("eggplant");
+    /// let cow: Cow<'_, str> = Cow::Borrowed("eggplant");
     /// // It will allocate on the heap and copy the string.
     /// let owned: String = String::from(cow);
     /// assert_eq!(&owned[..], "eggplant");

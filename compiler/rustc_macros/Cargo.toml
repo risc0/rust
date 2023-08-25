@@ -7,11 +7,8 @@ edition = "2021"
 proc-macro = true
 
 [dependencies]
-annotate-snippets = "0.9"
-fluent-bundle = "0.15.2"
-fluent-syntax = "0.11"
-synstructure = "0.12.1"
-syn = { version = "1", features = ["full"] }
+synstructure = "0.13.0"
+# FIXME(Nilstrieb): Updating this causes changes in the diagnostics output.
+syn = { version = "=2.0.8", features = ["full"] }
 proc-macro2 = "1"
 quote = "1"
-unic-langid = { version = "0.9.0", features = ["macros"] }

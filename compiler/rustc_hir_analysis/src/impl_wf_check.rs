@@ -15,7 +15,7 @@ use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::struct_span_err;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::LocalDefId;
-use rustc_middle::ty::query::Providers;
+use rustc_middle::query::Providers;
 use rustc_middle::ty::{self, TyCtxt, TypeVisitableExt};
 use rustc_span::{Span, Symbol};
 
@@ -76,7 +76,7 @@ fn enforce_impl_params_are_constrained(tcx: TyCtxt<'_>, impl_def_id: LocalDefId)
         // (#36836)
         tcx.sess.delay_span_bug(
             tcx.def_span(impl_def_id),
-            &format!(
+            format!(
                 "potentially unconstrained type parameters weren't evaluated: {:?}",
                 impl_self_ty,
             ),
@@ -106,10 +106,23 @@ fn enforce_impl_params_are_constrained(tcx: TyCtxt<'_>, impl_def_id: LocalDefId)
                     if item.defaultness(tcx).has_value() {
                         cgp::parameters_for(&tcx.type_of(def_id).subst_identity(), true)
                     } else {
-                        Vec::new()
+                        vec![]
                     }
                 }
-                ty::AssocKind::Fn | ty::AssocKind::Const => Vec::new(),
+                ty::AssocKind::Fn => {
+                    if !tcx.lower_impl_trait_in_trait_to_assoc_ty()
+                        && item.defaultness(tcx).has_value()
+                        && tcx.impl_method_has_trait_impl_trait_tys(item.def_id)
+                        && let Ok(table) = tcx.collect_return_position_impl_trait_in_trait_tys(def_id)
+                    {
+                        table.values().copied().flat_map(|ty| {
+                            cgp::parameters_for(&ty.subst_identity(), true)
+                        }).collect()
+                    } else {
+                        vec![]
+                    }
+                }
+                ty::AssocKind::Const => vec![],
             }
         })
         .collect();

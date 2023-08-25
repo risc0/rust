@@ -4,6 +4,7 @@ use rustc_hir::def_id::DefId;
 use rustc_hir::lang_items::LangItem;
 use rustc_infer::traits::util::PredicateSet;
 use rustc_infer::traits::ImplSource;
+use rustc_middle::query::Providers;
 use rustc_middle::ty::visit::TypeVisitableExt;
 use rustc_middle::ty::InternalSubsts;
 use rustc_middle::ty::{self, GenericParamDefKind, ToPredicate, Ty, TyCtxt, VtblEntry};
@@ -14,13 +15,13 @@ use std::fmt::Debug;
 use std::ops::ControlFlow;
 
 #[derive(Clone, Debug)]
-pub(super) enum VtblSegment<'tcx> {
+pub enum VtblSegment<'tcx> {
     MetadataDSA,
     TraitOwnEntries { trait_ref: ty::PolyTraitRef<'tcx>, emit_vptr: bool },
 }
 
 /// Prepare the segments for a vtable
-pub(super) fn prepare_vtable_segments<'tcx, T>(
+pub fn prepare_vtable_segments<'tcx, T>(
     tcx: TyCtxt<'tcx>,
     trait_ref: ty::PolyTraitRef<'tcx>,
     mut segment_visitor: impl FnMut(VtblSegment<'tcx>) -> ControlFlow<T>,
@@ -114,7 +115,7 @@ pub(super) fn prepare_vtable_segments<'tcx, T>(
                     .predicates
                     .into_iter()
                     .filter_map(move |(pred, _)| {
-                        pred.subst_supertrait(tcx, &inner_most_trait_ref).to_opt_poly_trait_pred()
+                        pred.subst_supertrait(tcx, &inner_most_trait_ref).as_trait_clause()
                     });
 
                 'diving_in_skip_visited_traits: loop {
@@ -353,15 +354,15 @@ pub(crate) fn vtable_trait_upcasting_coercion_new_vptr_slot<'tcx>(
     ),
 ) -> Option<usize> {
     let (source, target) = key;
-    assert!(matches!(&source.kind(), &ty::Dynamic(..)) && !source.needs_infer());
-    assert!(matches!(&target.kind(), &ty::Dynamic(..)) && !target.needs_infer());
+    assert!(matches!(&source.kind(), &ty::Dynamic(..)) && !source.has_infer());
+    assert!(matches!(&target.kind(), &ty::Dynamic(..)) && !target.has_infer());
 
     // this has been typecked-before, so diagnostics is not really needed.
     let unsize_trait_did = tcx.require_lang_item(LangItem::Unsize, None);
 
-    let trait_ref = tcx.mk_trait_ref(unsize_trait_did, [source, target]);
+    let trait_ref = ty::TraitRef::new(tcx, unsize_trait_did, [source, target]);
 
-    match tcx.codegen_select_candidate((ty::ParamEnv::reveal_all(), ty::Binder::dummy(trait_ref))) {
+    match tcx.codegen_select_candidate((ty::ParamEnv::reveal_all(), trait_ref)) {
         Ok(ImplSource::TraitUpcasting(implsrc_traitcasting)) => {
             implsrc_traitcasting.vtable_vptr_slot
         }
@@ -379,8 +380,8 @@ pub(crate) fn count_own_vtable_entries<'tcx>(
     tcx.own_existential_vtable_entries(trait_ref.def_id()).len()
 }
 
-pub(super) fn provide(providers: &mut ty::query::Providers) {
-    *providers = ty::query::Providers {
+pub(super) fn provide(providers: &mut Providers) {
+    *providers = Providers {
         own_existential_vtable_entries,
         vtable_entries,
         vtable_trait_upcasting_coercion_new_vptr_slot,

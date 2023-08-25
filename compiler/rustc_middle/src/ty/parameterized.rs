@@ -1,6 +1,6 @@
 use rustc_data_structures::fx::FxHashMap;
 use rustc_hir::def_id::DefIndex;
-use rustc_index::vec::{Idx, IndexVec};
+use rustc_index::{Idx, IndexVec};
 
 use crate::ty;
 
@@ -56,6 +56,7 @@ trivially_parameterized_over_tcx! {
     std::string::String,
     crate::metadata::ModChild,
     crate::middle::codegen_fn_attrs::CodegenFnAttrs,
+    crate::middle::debugger_visualizer::DebuggerVisualizerFile,
     crate::middle::exported_symbols::SymbolExportInfo,
     crate::middle::resolve_bound_vars::ObjectLifetimeDefault,
     crate::mir::ConstQualifs,
@@ -63,6 +64,7 @@ trivially_parameterized_over_tcx! {
     ty::DeducedParamAttrs,
     ty::Generics,
     ty::ImplPolarity,
+    ty::ImplTraitInTraitData,
     ty::ReprOptions,
     ty::TraitDef,
     ty::UnusedGenericParams,
@@ -71,6 +73,7 @@ trivially_parameterized_over_tcx! {
     ty::fast_reject::SimplifiedType,
     rustc_ast::Attribute,
     rustc_ast::DelimArgs,
+    rustc_ast::expand::StrippedCfgItem<rustc_hir::def_id::DefIndex>,
     rustc_attr::ConstStability,
     rustc_attr::DefaultBodyStability,
     rustc_attr::Deprecation,
@@ -90,7 +93,6 @@ trivially_parameterized_over_tcx! {
     rustc_session::cstore::ForeignModule,
     rustc_session::cstore::LinkagePreference,
     rustc_session::cstore::NativeLib,
-    rustc_span::DebuggerVisualizerFile,
     rustc_span::ExpnData,
     rustc_span::ExpnHash,
     rustc_span::ExpnId,
@@ -127,5 +129,6 @@ parameterized_over_tcx! {
     ty::Const,
     ty::Predicate,
     ty::Clause,
+    ty::ClauseKind,
     ty::GeneratorDiagnosticData,
 }

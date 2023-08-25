@@ -1,4 +1,4 @@
-// run-rustfix
+//@run-rustfix
 
 #![warn(clippy::significant_drop_tightening)]
 
@@ -14,6 +14,18 @@ pub fn complex_return_triggers_the_lint() -> i32 {
     let _ = *lock;
     drop(lock);
     foo()
+}
+
+pub fn issue_10413() {
+    let mutex = Mutex::new(Some(1));
+    let opt = Some(1);
+    if opt.is_some() {
+        let lock = mutex.lock().unwrap();
+        let _ = *lock;
+        if opt.is_some() {
+            let _ = *lock;
+        }
+    }
 }
 
 pub fn path_return_can_be_ignored() -> i32 {
