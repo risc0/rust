@@ -78,7 +78,7 @@ pub fn env() -> Env {
 }
 
 pub fn getenv(varname: &OsStr) -> Option<OsString> {
-    let varname = varname.bytes();
+    let varname = varname.as_os_str_bytes();
     let nbytes =
         unsafe { abi::sys_getenv(crate::ptr::null_mut(), 0, varname.as_ptr(), varname.len()) };
     if nbytes == usize::MAX {

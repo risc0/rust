@@ -9,8 +9,9 @@
 
 const WORD_SIZE: usize = core::mem::size_of::<u32>();
 
+mod abi;
+
 pub mod alloc;
-#[path = "../zkvm/args.rs"]
 pub mod args;
 #[path = "../unix/cmath.rs"]
 pub mod cmath;
@@ -19,6 +20,8 @@ pub mod env;
 pub mod fs;
 #[path = "../unsupported/io.rs"]
 pub mod io;
+#[path = "../unsupported/locks/mod.rs"]
+pub mod locks;
 #[path = "../unsupported/net.rs"]
 pub mod net;
 #[path = "../unsupported/once.rs"]
@@ -33,18 +36,18 @@ pub mod pipe;
 #[path = "../unsupported/process.rs"]
 pub mod process;
 pub mod stdio;
-pub mod thread_local_key;
-#[path = "../unsupported/time.rs"]
-pub mod time;
-
-#[path = "../unsupported/locks/mod.rs"]
-pub mod locks;
 #[path = "../unsupported/thread.rs"]
 pub mod thread;
+#[allow(unused)]
+#[path = "../unsupported/thread_local_dtor.rs"]
+pub mod thread_local_dtor;
+pub mod thread_local_key;
+#[path = "../unsupported/thread_parking.rs"]
+pub mod thread_parking;
+#[path = "../unsupported/time.rs"]
+pub mod time;
 
 #[path = "../unsupported/common.rs"]
 #[deny(unsafe_op_in_unsafe_fn)]
 mod common;
 pub use common::*;
-
-mod abi;
