@@ -12,8 +12,6 @@ const WORD_SIZE: usize = core::mem::size_of::<u32>();
 pub mod alloc;
 #[path = "../zkvm/args.rs"]
 pub mod args;
-#[path = "../unix/cmath.rs"]
-pub mod cmath;
 pub mod env;
 #[path = "../unsupported/fs.rs"]
 pub mod fs;
@@ -24,8 +22,6 @@ pub mod net;
 #[path = "../unsupported/once.rs"]
 pub mod once;
 pub mod os;
-#[path = "../unix/os_str.rs"]
-pub mod os_str;
 #[path = "../unix/path.rs"]
 pub mod path;
 #[path = "../unsupported/pipe.rs"]
