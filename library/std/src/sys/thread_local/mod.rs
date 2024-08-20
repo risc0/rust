@@ -6,7 +6,11 @@
 // "static" is for single-threaded platforms where a global static is sufficient.
 
 cfg_if::cfg_if! {
-    if #[cfg(any(all(target_family = "wasm", not(target_feature = "atomics")), target_os = "uefi"))] {
+    if #[cfg(any(
+        all(target_family = "wasm", not(target_feature = "atomics")),
+        target_os = "uefi",
+        target_os = "zkvm"
+    ))] {
         #[doc(hidden)]
         mod static_local;
         #[doc(hidden)]
