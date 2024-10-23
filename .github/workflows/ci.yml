@@ -57,9 +57,11 @@ jobs:
             ./rust-toolchain-${{ matrix.triple }}.tar.gz \
             -C ./build/${{ matrix.triple }}/stage2/ \
             .
+        working-directory: rust
 
       - name: "Upload workflow artifact"
         uses: "actions/upload-artifact@v3"
         with:
           name: "rust-toolchain-${{ matrix.triple }}.tar.gz"
           path: "./rust-toolchain-${{ matrix.triple }}.tar.gz"
+          working-directory: rust
