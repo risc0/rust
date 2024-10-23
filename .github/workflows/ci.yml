@@ -63,5 +63,4 @@ jobs:
         uses: "actions/upload-artifact@v3"
         with:
           name: "rust-toolchain-${{ matrix.triple }}.tar.gz"
-          path: "./rust-toolchain-${{ matrix.triple }}.tar.gz"
-          working-directory: rust
+          path: "rust/rust-toolchain-${{ matrix.triple }}.tar.gz"
