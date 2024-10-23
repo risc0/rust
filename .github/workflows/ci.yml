@@ -46,11 +46,20 @@ jobs:
         run: GITHUB_ACTIONS=false RISC0_BUILD_DIR=$GITHUB_WORKSPACE cargo run --bin cargo-risczero -- risczero build-toolchain
         working-directory: risc0
 
-      - name: Archive build output
-        uses: actions/upload-artifact@v3
+      - name: "Archive toolchain"
+        run: |
+          # Use `rsync` instead of `cp` due to hardlinks
+          rsync --recursive ./build/${{ matrix.triple }}/stage2-tools-bin/ ./build/${{ matrix.triple }}/stage2/bin/
+          tar \
+            --exclude lib/rustlib/src \
+            --exclude lib/rustlib/rustc-src \
+            -hczvf \
+            ./rust-toolchain-${{ matrix.triple }}.tar.gz \
+            -C ./build/${{ matrix.triple }}/stage2/ \
+            .
+
+      - name: "Upload workflow artifact"
+        uses: "actions/upload-artifact@v3"
         with:
-          name: rust-toolchain-${{ matrix.triple }}
-          path: |
-            rust/build/${{ matrix.triple }}/stage2
-            !rust/build/${{ matrix.triple }}/stage2/lib/rustlib/src
-            !rust/build/${{ matrix.triple }}/stage2/lib/rustlib/rustc-src
+          name: "rust-toolchain-${{ matrix.triple }}.tar.gz"
+          path: "./rust-toolchain-${{ matrix.triple }}.tar.gz"
