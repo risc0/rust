@@ -48,8 +48,6 @@ jobs:
 
       - name: "Archive toolchain"
         run: |
-          # Use `rsync` instead of `cp` due to hardlinks
-          rsync --recursive ./build/${{ matrix.triple }}/stage2-tools-bin/ ./build/${{ matrix.triple }}/stage2/bin/
           tar \
             --exclude lib/rustlib/src \
             --exclude lib/rustlib/rustc-src \
