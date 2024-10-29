@@ -58,7 +58,18 @@ jobs:
         working-directory: rust
 
       - name: "Upload workflow artifact"
-        uses: "actions/upload-artifact@v3"
+        uses: "actions/upload-artifact@v4"
         with:
           name: "rust-toolchain-${{ matrix.triple }}.tar.gz"
           path: "rust/rust-toolchain-${{ matrix.triple }}.tar.gz"
+
+      # wait for recently uploaded release asset to become available,
+      # otherwise cargo-binstall sometimes errors with 404.
+      - name: Wait for upload
+        run: sleep 90
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Display structure of downloaded artifacts
+        run: ls -R ./artifacts
