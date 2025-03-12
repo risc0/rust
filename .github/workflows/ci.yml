@@ -4,7 +4,7 @@ on:
   push:
     branches: [ risc0 ]
   pull_request:
-    branches: [ risc0 ]
+    branches: [ risc0, "risc0-*" ]
   workflow_call:
   workflow_dispatch:
 
