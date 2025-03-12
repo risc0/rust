@@ -18,15 +18,9 @@ jobs:
       uses: actions/download-artifact@v4
       with:
         path: artifacts
-    - name: Compress artifacts
-      shell: bash
-      run: |
-        ls -lha ./artifacts
-        mkdir assets
-        for DIR in $(ls ./artifacts); do
-          tar czf "assets/$DIR.tar.gz" -C "artifacts/$DIR" .
-        done
-        ls -lha ./assets
+        merge-multiple: true
+    - name: Display structure of downloaded artifacts
+      run: ls -R ./artifacts
     - name: Create release
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -36,5 +30,5 @@ jobs:
           tar xvz  --strip-components=2 --exclude=man
         chmod +x ./gh
 
-        ./gh release create --repo "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" ./assets/* || \
-        ./gh release upload --repo "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" ./assets/*
+        ./gh release create --repo "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" ./artifacts/* || \
+        ./gh release upload --repo "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" ./artifacts/*
