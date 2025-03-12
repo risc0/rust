@@ -36,18 +36,18 @@ jobs:
           fetch-depth: 0
 
       - name: Check out risc0/risc0
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           repository: risc0/risc0
           ref: main
           path: risc0
 
       - name: Build
-        run: GITHUB_ACTIONS=false RISC0_BUILD_DIR=$GITHUB_WORKSPACE cargo run --bin cargo-risczero -- risczero build-toolchain
+        run: GITHUB_ACTIONS=false cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE
         working-directory: risc0
 
       - name: Archive build output
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: rust-toolchain-${{ matrix.triple }}
           path: |
