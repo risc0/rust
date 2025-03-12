@@ -43,7 +43,7 @@ jobs:
           path: risc0
 
       - name: Build
-        run: cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
+        run: GITHUB_ACTIONS=false cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
         working-directory: risc0
 
       - name: Archive build output
