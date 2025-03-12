@@ -20,7 +20,7 @@ jobs:
           - os: Linux
             arch: X64
             triple: x86_64-unknown-linux-gnu
-    runs-on: [ self-hosted, prod, "${{ matrix.os }}", "${{ matrix.arch }}" ]
+    runs-on: [ self-hosted, release, "${{ matrix.os }}", "${{ matrix.arch }}" ]
     steps:
       - name: Install Rust
         uses: risc0/actions-rs-toolchain@v1
@@ -46,11 +46,19 @@ jobs:
         run: GITHUB_ACTIONS=false cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
         working-directory: risc0
 
-      - name: Archive build output
-        uses: actions/upload-artifact@v4
+      - name: "Archive toolchain"
+        run: |
+          tar \
+            --exclude lib/rustlib/src \
+            --exclude lib/rustlib/rustc-src \
+            -hczvf \
+            ./rust-toolchain-${{ matrix.triple }}.tar.gz \
+            -C ./build/${{ matrix.triple }}/stage2/ \
+            .
+        working-directory: rust
+
+      - name: "Upload workflow artifact"
+        uses: "actions/upload-artifact@v4"
         with:
-          name: rust-toolchain-${{ matrix.triple }}
-          path: |
-            rust/build/${{ matrix.triple }}/stage2
-            !rust/build/${{ matrix.triple }}/stage2/lib/rustlib/src
-            !rust/build/${{ matrix.triple }}/stage2/lib/rustlib/rustc-src
+          name: "rust-toolchain-${{ matrix.triple }}.tar.gz"
+          path: "rust/rust-toolchain-${{ matrix.triple }}.tar.gz"
