@@ -39,8 +39,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: risc0/risc0
-          branch: erik/rzup-for-1.85
-          ref: main
+          ref: erik/rzup-for-1.85
           path: risc0
 
       - name: Build
