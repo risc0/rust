@@ -42,7 +42,7 @@ jobs:
           ref: erik/rzup-for-1.85
           path: risc0
 
-      - name: Build and archive to $GITHUB_WORKSPACE
+      - name: Build and archive
         run: |
           GITHUB_ACTIONS=false RISC0_RUST_DEST_DIR=$GITHUB_WORKSPACE/risc0/publish cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
           tree -L 3
