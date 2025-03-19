@@ -51,9 +51,10 @@ jobs:
             --exclude share \
             --exclude bash_completion.d \
             -hczvf \
-            $GITHUB_WORKSPACE/rust-toolchain-${{ matrix.triple }}.tar.gz \
+            rust-toolchain-${{ matrix.triple }}.tar.gz \
             -C publish \
             .
+          tree -L 3
         working-directory: risc0
 
       - name: "Upload workflow artifact"
