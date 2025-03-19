@@ -46,7 +46,6 @@ jobs:
         run: |
           mkdir -p publish
           GITHUB_ACTIONS=false RISC0_RUST_DEST_DIR=./publish cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
-          tree -L 3
           tar \
             --exclude share \
             --exclude bash_completion.d \
@@ -54,7 +53,6 @@ jobs:
             rust-toolchain-${{ matrix.triple }}.tar.gz \
             -C publish \
             .
-          tree -L 3
         working-directory: risc0
 
       - name: "Upload workflow artifact"
