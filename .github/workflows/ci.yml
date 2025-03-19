@@ -45,6 +45,7 @@ jobs:
       - name: Build and Archive toolchain
         run: |
           GITHUB_ACTIONS=false cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
+          tree ../ -L 4
           tar \
             --exclude lib/rustlib/src \
             --exclude lib/rustlib/rustc-src \
