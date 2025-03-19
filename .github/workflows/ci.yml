@@ -44,7 +44,7 @@ jobs:
 
       - name: Build
         run: |
-          GITHUB_ACTIONS=false RISC0_RUST_DEST_DIR=$GITHUB_WORKSPACE/rust/publish cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
+          GITHUB_ACTIONS=false RISC0_RUST_DEST_DIR=$GITHUB_WORKSPACE/publish cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
           tree -L 3
         working-directory: risc0
 
@@ -55,8 +55,8 @@ jobs:
             --exclude share \
             --exclude bash_completion.d \
             -hczvf \
-            ./rust-toolchain-${{ matrix.triple }}.tar.gz \
-            -C publish \
+            $GITHUB_WORKSPACE/rust-toolchain-${{ matrix.triple }}.tar.gz \
+            -C $GITHUB_WORKSPACE/publish \
             .
         working-directory: rust
 
@@ -64,4 +64,4 @@ jobs:
         uses: "actions/upload-artifact@v4"
         with:
           name: "rust-toolchain-${{ matrix.triple }}.tar.gz"
-          path: "rust/rust-toolchain-${{ matrix.triple }}.tar.gz"
+          path: "$GITHUB_WORKAPCE/rust-toolchain-${{ matrix.triple }}.tar.gz"
