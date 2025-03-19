@@ -39,13 +39,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: risc0/risc0
-          ref: erik/rzup-for-1.85
+          ref: main
           path: risc0
 
       - name: Build and Archive toolchain
         run: |
+          rm -rf $GITHUB_WORKSPACE/rust/build
           GITHUB_ACTIONS=false cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
-          tree ../ -L 4
           tar \
             --exclude lib/rustlib/src \
             --exclude lib/rustlib/rustc-src \
