@@ -42,7 +42,11 @@ jobs:
           ref: erik/rzup-for-1.85
           path: risc0
 
-      - name: Build and archive
+      - name: Build
+        run: GITHUB_ACTIONS=false cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
+        working-directory: risc0
+
+      - name: "Archive toolchain"
         run: |
           GITHUB_ACTIONS=false cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
           tar \
