@@ -43,17 +43,17 @@ jobs:
           path: risc0
 
       - name: Build
-        run: GITHUB_ACTIONS=false cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
+        run: GITHUB_ACTIONS=false RISC0_RUST_DEST_DIR=$GITHUB_WORKSPACE/rust/pubish cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
         working-directory: risc0
 
       - name: "Archive toolchain"
         run: |
           tar \
-            --exclude lib/rustlib/src \
-            --exclude lib/rustlib/rustc-src \
+            --exclude share \
+            --exclude bash_completion.d \
             -hczvf \
             ./rust-toolchain-${{ matrix.triple }}.tar.gz \
-            -C ./build/${{ matrix.triple }}/stage2/ \
+            -C publish \
             .
         working-directory: rust
 
