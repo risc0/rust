@@ -44,14 +44,15 @@ jobs:
 
       - name: Build and archive
         run: |
-          GITHUB_ACTIONS=false RISC0_RUST_DEST_DIR=$GITHUB_WORKSPACE/risc0/publish cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
+          mkdir -p publish
+          GITHUB_ACTIONS=false RISC0_RUST_DEST_DIR=./publish cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
           tree -L 3
           tar \
             --exclude share \
             --exclude bash_completion.d \
             -hczvf \
             $GITHUB_WORKSPACE/rust-toolchain-${{ matrix.triple }}.tar.gz \
-            -C $GITHUB_WORKSPACE/risc0/publish \
+            -C publish \
             .
         working-directory: risc0
 
