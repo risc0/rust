@@ -42,23 +42,20 @@ jobs:
           ref: erik/rzup-for-1.85
           path: risc0
 
-      - name: Build
-        run: GITHUB_ACTIONS=false cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
-        working-directory: risc0
-
-      - name: "Archive toolchain"
+      - name: Build and Archive toolchain
         run: |
+          GITHUB_ACTIONS=false cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
           tar \
             --exclude lib/rustlib/src \
             --exclude lib/rustlib/rustc-src \
             -hczvf \
             ./rust-toolchain-${{ matrix.triple }}.tar.gz \
-            -C ./build/${{ matrix.triple }}/stage2/ \
+            -C $GITHUB_WORKSPACE/rust/build/${{ matrix.triple }}/stage2/ \
             .
-        working-directory: rust
+        working-directory: risc0
 
       - name: "Upload workflow artifact"
         uses: "actions/upload-artifact@v4"
         with:
           name: "rust-toolchain-${{ matrix.triple }}.tar.gz"
-          path: "rust/rust-toolchain-${{ matrix.triple }}.tar.gz"
+          path: "risc0/rust-toolchain-${{ matrix.triple }}.tar.gz"
