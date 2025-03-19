@@ -42,14 +42,9 @@ jobs:
           ref: erik/rzup-for-1.85
           path: risc0
 
-      - name: Build
+      - name: Build and archive to $GITHUB_WORKSPACE
         run: |
-          GITHUB_ACTIONS=false RISC0_RUST_DEST_DIR=$GITHUB_WORKSPACE/publish cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
-          tree -L 3
-        working-directory: risc0
-
-      - name: "Archive toolchain"
-        run: |
+          GITHUB_ACTIONS=false RISC0_RUST_DEST_DIR=$GITHUB_WORKSPACE/publish cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE
           tree -L 3
           tar \
             --exclude share \
@@ -58,10 +53,10 @@ jobs:
             $GITHUB_WORKSPACE/rust-toolchain-${{ matrix.triple }}.tar.gz \
             -C $GITHUB_WORKSPACE/publish \
             .
-        working-directory: rust
+        working-directory: risc0
 
       - name: "Upload workflow artifact"
         uses: "actions/upload-artifact@v4"
         with:
           name: "rust-toolchain-${{ matrix.triple }}.tar.gz"
-          path: "$GITHUB_WORKAPCE/rust-toolchain-${{ matrix.triple }}.tar.gz"
+          path: "risc0/rust-toolchain-${{ matrix.triple }}.tar.gz"
