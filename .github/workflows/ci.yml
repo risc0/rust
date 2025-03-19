@@ -44,19 +44,18 @@ jobs:
 
       - name: Build and archive
         run: |
-          rm -rf publish
-          GITHUB_ACTIONS=false RISC0_RUST_DEST_DIR=./publish cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
+          GITHUB_ACTIONS=false cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
           tar \
-            --exclude share \
-            --exclude bash_completion.d \
+            --exclude lib/rustlib/src \
+            --exclude lib/rustlib/rustc-src \
             -hczvf \
-            rust-toolchain-${{ matrix.triple }}.tar.gz \
-            -C publish \
+            ./rust-toolchain-${{ matrix.triple }}.tar.gz \
+            -C ./build/${{ matrix.triple }}/stage2/ \
             .
-        working-directory: risc0
+        working-directory: rust
 
       - name: "Upload workflow artifact"
         uses: "actions/upload-artifact@v4"
         with:
           name: "rust-toolchain-${{ matrix.triple }}.tar.gz"
-          path: "risc0/rust-toolchain-${{ matrix.triple }}.tar.gz"
+          path: "rust/rust-toolchain-${{ matrix.triple }}.tar.gz"
