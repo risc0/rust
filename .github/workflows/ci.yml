@@ -43,7 +43,7 @@ jobs:
           path: risc0
 
       - name: Build
-        run: GITHUB_ACTIONS=false RISC0_RUST_DEST_DIR=$GITHUB_WORKSPACE/rust/pubish cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
+        run: GITHUB_ACTIONS=false RISC0_RUST_DEST_DIR=$GITHUB_WORKSPACE/rust/publish cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
         working-directory: risc0
 
       - name: "Archive toolchain"
