@@ -1386,6 +1386,7 @@ impl Step for CrtBeginEnd {
             .warnings(false)
             .debug(false)
             .opt_level(3)
+            .no_default_flags(true)
             .file(crtbegin_src)
             .file(crtend_src);
 
@@ -1494,6 +1495,7 @@ impl Step for Libunwind {
                 cfg.define("_LIBUNWIND_HIDE_SYMBOLS", "1");
                 cfg.define("_LIBUNWIND_IS_NATIVE_ONLY", "1");
             }
+            cfg.no_default_flags(true);
         }
 
         cc_cfg.compiler(builder.cc(self.target));

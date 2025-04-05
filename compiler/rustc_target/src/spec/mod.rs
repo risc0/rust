@@ -1954,6 +1954,9 @@ supported_targets! {
 
     ("riscv32i-unknown-none-elf", riscv32i_unknown_none_elf),
     ("riscv32im-risc0-zkvm-elf", riscv32im_risc0_zkvm_elf),
+    ("riscv32im-unknown-linux-gnu", riscv32im_unknown_linux_gnu),
+    ("riscv32im-unknown-linux-musl", riscv32im_unknown_linux_musl),
+    ("riscv32im-unknown-linux-uclibc", riscv32im_unknown_linux_uclibc),
     ("riscv32im-unknown-none-elf", riscv32im_unknown_none_elf),
     ("riscv32ima-unknown-none-elf", riscv32ima_unknown_none_elf),
     ("riscv32imc-unknown-none-elf", riscv32imc_unknown_none_elf),
