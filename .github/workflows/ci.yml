@@ -42,6 +42,9 @@ jobs:
           ref: main
           path: risc0
 
+      - name: set RISC0_HOME
+        run: echo "RISC0_HOME=$GITHUB_WORKSPACE/rzup_artifacts" >> $GITHUB_ENV
+
       - name: Build
         run: GITHUB_ACTIONS=false cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
         working-directory: risc0
@@ -53,7 +56,7 @@ jobs:
             --exclude lib/rustlib/rustc-src \
             -hczvf \
             ./rust-toolchain-${{ matrix.triple }}.tar.gz \
-            -C $HOME/.risc0/toolchains/*rust*/ \
+            -C $GITHUB_WORKSPACE/rzup_artifacts/toolchains/*rust*/ \
             .
         working-directory: rust
 
