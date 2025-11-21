@@ -48,7 +48,12 @@ jobs:
       - name: clear out RISC0_HOME
         run: rm -rf $RISC0_HOME
 
-      - name: Build
+      - if: matrix.os == 'Linux'
+        run: |
+          cp rust/.github/containers/release/Dockerfile ./
+          docker build -f Dockerfile --output $RISC0_HOME/toolchains .
+
+      - if: matrix.os == 'macOS'
         run: GITHUB_ACTIONS=false cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
         working-directory: risc0
 
