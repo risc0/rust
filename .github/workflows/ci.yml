@@ -23,9 +23,7 @@ jobs:
     runs-on: [ self-hosted, cluster, "${{ matrix.os }}", "${{ matrix.arch }}" ]
     steps:
       - name: Install Rust
-        uses: risc0/actions-rs-toolchain@v1
-        with:
-            toolchain: stable
+        uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Check out risc0/rust
         uses: actions/checkout@v3
