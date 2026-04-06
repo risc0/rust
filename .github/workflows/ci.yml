@@ -22,15 +22,15 @@ jobs:
             triple: x86_64-unknown-linux-gnu
     runs-on: [ self-hosted, cluster, "${{ matrix.os }}", "${{ matrix.arch }}" ]
     steps:
-      - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-
       - name: Check out risc0/rust
         uses: actions/checkout@v3
         with:
           submodules: 'recursive'
           path: rust
           fetch-depth: 0
+
+      - name: Install Rust
+        uses: ./rust/.github/actions/rustup
 
       - name: Check out risc0/risc0
         uses: actions/checkout@v4
