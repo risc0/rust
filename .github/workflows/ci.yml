@@ -49,6 +49,9 @@ jobs:
         run: docker build -f rust/.github/containers/release/Dockerfile --output $RISC0_HOME/toolchains .
 
       - if: matrix.os == 'macOS'
+        run: brew install ninja
+
+      - if: matrix.os == 'macOS'
         run: GITHUB_ACTIONS=false cargo run --bin rzup -- build rust --path $GITHUB_WORKSPACE/rust
         working-directory: risc0
 
