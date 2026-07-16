@@ -36,7 +36,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: risc0/risc0
-          ref: main
+          ref: bobbobbio/rust-1.97.0-rzup-update
           path: risc0
 
       - name: set RISC0_HOME
